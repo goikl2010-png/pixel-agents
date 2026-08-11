@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import { HookEventHandler } from '../src/hookEventHandler.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
+import { codexProvider } from '../src/providers/hook/codex/codex.js';
 import { SessionRouter } from '../src/sessionRouter.js';
 import type { AgentState } from '../src/types.js';
 
@@ -67,7 +68,48 @@ describe('HookEventHandler', () => {
       permissionTimers,
       claudeProvider,
       new SessionRouter(),
+      undefined,
+      [codexProvider],
     );
+  });
+
+  it('routes Codex lifecycle once without colliding with Claude', () => {
+    const detected = vi.fn(
+      (sessionId: string, _path: string | undefined, cwd: string, providerId?: string) => {
+        const id = providerId === 'codex' ? 2 : 1;
+        const agent = createTestAgent({ id, sessionId, projectDir: cwd, providerId });
+        agents.set(id, agent);
+        handler.registerAgent(sessionId, id, providerId);
+      },
+    );
+    handler.setLifecycleCallbacks({ onExternalSessionDetected: detected });
+    agents.set(1, createTestAgent({ id: 1, sessionId: 'same', providerId: 'claude' }));
+    handler.registerAgent('same', 1, 'claude');
+
+    handler.handleEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'same',
+      cwd: '/test',
+    });
+    handler.handleEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'same',
+      cwd: '/test',
+    });
+    handler.handleEvent('codex', { hook_event_name: 'Stop', session_id: 'same' });
+
+    expect(detected).toHaveBeenCalledTimes(1);
+    expect(agents.size).toBe(2);
+    expect(agents.get(2)?.isWaiting).toBe(true);
+  });
+
+  it('drops unknown providers without changing agents', () => {
+    handler.handleEvent('unknown', {
+      hook_event_name: 'SessionStart',
+      session_id: 'bad',
+      cwd: '/test',
+    });
+    expect(agents.size).toBe(0);
   });
 
   // ── PermissionRequest ───────────────────────────────────────

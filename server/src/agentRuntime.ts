@@ -38,6 +38,7 @@ import type { HookEvent } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
+import { codexProvider } from './providers/index.js';
 import { SessionRouter } from './sessionRouter.js';
 import { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
@@ -149,11 +150,12 @@ export class AgentRuntime {
       provider,
       new SessionRouter(),
       this.watchAllSessions,
+      provider.id === codexProvider.id ? [] : [codexProvider],
     );
 
     // Wire hook lifecycle callbacks to shared agent operations
     this.hookEventHandler.setLifecycleCallbacks({
-      onExternalSessionDetected: (sessionId, transcriptPath, cwd) => {
+      onExternalSessionDetected: (sessionId, transcriptPath, cwd, providerId = 'claude') => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
         // Teammate session of a tracked lead? Attach it as a teammate character
         // instead of adopting a generic external agent -- and regardless of the
@@ -211,7 +213,10 @@ export class AgentRuntime {
           this.waitingTimers,
           this.permissionTimers,
           () => this.store.persist(),
-          (agent) => this.registerAgent(agent.sessionId, agent.id),
+          (agent) => {
+            agent.providerId = providerId;
+            this.registerAgent(agent.sessionId, agent.id, providerId);
+          },
         );
       },
       onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
@@ -293,13 +298,13 @@ export class AgentRuntime {
   }
 
   /** Register an agent with the hook event handler for session->agent mapping. */
-  registerAgent(sessionId: string, agentId: number): void {
-    this.hookEventHandler.registerAgent(sessionId, agentId);
+  registerAgent(sessionId: string, agentId: number, providerId = 'claude'): void {
+    this.hookEventHandler.registerAgent(sessionId, agentId, providerId);
   }
 
   /** Unregister an agent from the hook event handler. */
-  unregisterAgent(sessionId: string): void {
-    this.hookEventHandler.unregisterAgent(sessionId);
+  unregisterAgent(sessionId: string, providerId = 'claude'): void {
+    this.hookEventHandler.unregisterAgent(sessionId, providerId);
   }
 
   // ── Agent removal (shared cleanup) ──

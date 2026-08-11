@@ -2,6 +2,7 @@ import { HOOK_EVENT_BUFFER_MS } from './constants.js';
 
 /** Pending external session info (waiting for confirmation event before creating agent). */
 export interface PendingExternalSession {
+  providerId?: string;
   sessionId: string;
   /** Transcript file path. Undefined for providers without transcripts (OpenCode, Copilot). */
   transcriptPath: string | undefined;
@@ -32,41 +33,46 @@ export class SessionRouter {
 
   /** Register a session→agent mapping. Returns any buffered events for this
    *  session so the caller can re-dispatch them. */
-  register(sessionId: string, agentId: number): BufferedEvent[] {
-    this.sessionToAgentId.set(sessionId, agentId);
-    return this.flushBuffered(sessionId);
+  private key(providerId: string, sessionId: string): string {
+    return `${providerId}:${sessionId}`;
   }
 
-  unregister(sessionId: string): void {
-    this.sessionToAgentId.delete(sessionId);
+  register(sessionId: string, agentId: number, providerId = 'claude'): BufferedEvent[] {
+    this.sessionToAgentId.set(this.key(providerId, sessionId), agentId);
+    return this.flushBuffered(sessionId, providerId);
   }
 
-  resolve(sessionId: string): number | undefined {
-    return this.sessionToAgentId.get(sessionId);
+  unregister(sessionId: string, providerId = 'claude'): void {
+    this.sessionToAgentId.delete(this.key(providerId, sessionId));
   }
 
-  hasSession(sessionId: string): boolean {
-    return this.sessionToAgentId.has(sessionId);
+  resolve(sessionId: string, providerId = 'claude'): number | undefined {
+    return this.sessionToAgentId.get(this.key(providerId, sessionId));
+  }
+
+  hasSession(sessionId: string, providerId = 'claude'): boolean {
+    return this.sessionToAgentId.has(this.key(providerId, sessionId));
   }
 
   // ── Pending external sessions ──────────────────────────────────────
 
-  storePending(sessionId: string, info: PendingExternalSession): void {
-    this.pendingSessions.set(sessionId, info);
+  storePending(sessionId: string, info: PendingExternalSession, providerId = 'claude'): void {
+    this.pendingSessions.set(this.key(providerId, sessionId), info);
   }
 
-  confirmPending(sessionId: string): PendingExternalSession | undefined {
-    const info = this.pendingSessions.get(sessionId);
-    if (info) this.pendingSessions.delete(sessionId);
+  confirmPending(sessionId: string, providerId = 'claude'): PendingExternalSession | undefined {
+    const key = this.key(providerId, sessionId);
+    const info = this.pendingSessions.get(key);
+    if (info) this.pendingSessions.delete(key);
     return info;
   }
 
-  hasPending(sessionId: string): boolean {
-    return this.pendingSessions.has(sessionId);
+  hasPending(sessionId: string, providerId = 'claude'): boolean {
+    return this.pendingSessions.has(this.key(providerId, sessionId));
   }
 
-  discardPending(sessionId: string): void {
-    this.pendingSessions.delete(sessionId);
+  discardPending(sessionId: string, providerId = 'claude'): void {
+    this.pendingSessions.delete(this.key(providerId, sessionId));
   }
 
   // ── Event buffering ────────────────────────────────────────────────
@@ -80,8 +86,8 @@ export class SessionRouter {
     }
   }
 
-  hasBuffered(sessionId: string): boolean {
-    return this.buffer.some((b) => b.event.session_id === sessionId);
+  hasBuffered(sessionId: string, providerId = 'claude'): boolean {
+    return this.buffer.some((b) => b.providerId === providerId && b.event.session_id === sessionId);
   }
 
   pruneExpired(): void {
@@ -104,9 +110,13 @@ export class SessionRouter {
 
   // ── Private ────────────────────────────────────────────────────────
 
-  private flushBuffered(sessionId: string): BufferedEvent[] {
-    const toFlush = this.buffer.filter((b) => b.event.session_id === sessionId);
-    this.buffer = this.buffer.filter((b) => b.event.session_id !== sessionId);
+  private flushBuffered(sessionId: string, providerId: string): BufferedEvent[] {
+    const toFlush = this.buffer.filter(
+      (b) => b.providerId === providerId && b.event.session_id === sessionId,
+    );
+    this.buffer = this.buffer.filter(
+      (b) => b.providerId !== providerId || b.event.session_id !== sessionId,
+    );
     this.cleanupBufferTimer();
     return toFlush;
   }

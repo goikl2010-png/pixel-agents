@@ -37,6 +37,7 @@ interface SessionLifecycleCallbacks {
     sessionId: string,
     transcriptPath: string | undefined,
     cwd: string,
+    providerId?: string,
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -66,10 +67,13 @@ export class HookEventHandler {
     private agents: AgentStateStore,
     private waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
     private permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
-    private provider: HookProvider,
+    provider: HookProvider,
     private sessionRouter: SessionRouter,
     private watchAllSessionsRef?: { current: boolean },
+    additionalProviders: readonly HookProvider[] = [],
   ) {
+    this.provider = provider;
+    this.providers = new Map([provider, ...additionalProviders].map((p) => [p.id, p]));
     if (provider.protocolVersion !== HookEventHandler.SUPPORTED_PROTOCOL_VERSION) {
       console.warn(
         `[Pixel Agents] HookProvider "${provider.id}" reports protocolVersion=${provider.protocolVersion}, ` +
@@ -78,6 +82,9 @@ export class HookEventHandler {
       );
     }
   }
+
+  private provider: HookProvider;
+  private readonly providers: Map<string, HookProvider>;
 
   /** Merged set of tool names that spawn subagents (teammates + within-turn subagents
    *  when a team provider is attached, or the base HookProvider set otherwise). */
@@ -107,8 +114,8 @@ export class HookEventHandler {
   }
 
   /** Register an agent for hook event routing. Flushes any buffered events for this session. */
-  registerAgent(sessionId: string, agentId: number): void {
-    const flushed = this.sessionRouter.register(sessionId, agentId);
+  registerAgent(sessionId: string, agentId: number, providerId = 'claude'): void {
+    const flushed = this.sessionRouter.register(sessionId, agentId, providerId);
     if (debug && flushed.length > 0)
       console.log(
         `[Pixel Agents] Hook: flushing ${flushed.length} buffered event(s) for session ${sessionId.slice(0, 8)}...`,
@@ -119,8 +126,8 @@ export class HookEventHandler {
   }
 
   /** Remove an agent's session mapping (called on agent removal/terminal close). */
-  unregisterAgent(sessionId: string): void {
-    this.sessionRouter.unregister(sessionId);
+  unregisterAgent(sessionId: string, providerId = 'claude'): void {
+    this.sessionRouter.unregister(sessionId, providerId);
   }
 
   /**
@@ -130,6 +137,9 @@ export class HookEventHandler {
    * @param event - The hook event payload from the CLI tool
    */
   handleEvent(_providerId: string, event: HookEvent): void {
+    const selectedProvider = this.providers.get(_providerId);
+    if (!selectedProvider) return;
+    this.provider = selectedProvider;
     if (this.provider.protocolVersion !== HookEventHandler.SUPPORTED_PROTOCOL_VERSION) {
       return; // version mismatch already logged in constructor
     }
@@ -177,7 +187,7 @@ export class HookEventHandler {
         console.log(`[Pixel Agents] Hook: SessionStart(source=${source}, session=${sid}...)`);
 
       // Check registered mapping
-      const existingAgentId = this.sessionRouter.resolve(event.session_id);
+      const existingAgentId = this.sessionRouter.resolve(event.session_id, _providerId);
       if (existingAgentId !== undefined) {
         const agent = this.agents.get(existingAgentId);
         if (agent) {
@@ -191,8 +201,11 @@ export class HookEventHandler {
       }
       // Check auto-discovery (agent exists but not yet registered for hooks)
       for (const [id, agent] of this.agents) {
-        if (agent.sessionId === event.session_id) {
-          this.registerAgent(agent.sessionId, id);
+        if (
+          agent.sessionId === event.session_id &&
+          (agent.providerId ?? 'claude') === _providerId
+        ) {
+          this.registerAgent(agent.sessionId, id, _providerId);
           agent.hookDelivered = true;
           if (debug)
             console.log(
@@ -219,8 +232,8 @@ export class HookEventHandler {
               console.log(
                 `[Pixel Agents] Hook: Agent ${id} - /${normEvent.source} detected, reassigning to ${event.session_id}`,
               );
-              this.sessionRouter.unregister(agent.sessionId);
-              this.registerAgent(event.session_id, id);
+              this.sessionRouter.unregister(agent.sessionId, _providerId);
+              this.registerAgent(event.session_id, id, _providerId);
               this.lifecycleCallbacks.onSessionClear?.(id, event.session_id, transcriptPath);
               return;
             }
@@ -231,6 +244,15 @@ export class HookEventHandler {
       // arrives (Stop, Notification, PermissionRequest). This filters transient sessions
       // from Claude Code Extension which fire SessionStart + SessionEnd without any activity.
       if (transcriptPath || cwd) {
+        if (_providerId === 'codex') {
+          this.lifecycleCallbacks.onExternalSessionDetected?.(
+            event.session_id,
+            undefined,
+            cwd ?? '',
+            _providerId,
+          );
+          return;
+        }
         // For --resume, clear dismissals so the file can be re-adopted
         if (normEvent.source === 'resume' && transcriptPath) {
           this.lifecycleCallbacks.onSessionResume?.(transcriptPath);
@@ -239,11 +261,16 @@ export class HookEventHandler {
           console.log(
             `[Pixel Agents] Hook: SessionStart(source=${source}) -> pending external session ${sid}..., awaiting confirmation`,
           );
-        this.sessionRouter.storePending(event.session_id, {
-          sessionId: event.session_id,
-          transcriptPath,
-          cwd: cwd ?? '',
-        });
+        this.sessionRouter.storePending(
+          event.session_id,
+          {
+            providerId: _providerId,
+            sessionId: event.session_id,
+            transcriptPath,
+            cwd: cwd ?? '',
+          },
+          _providerId,
+        );
       } else {
         if (debug && tracked)
           console.log(
@@ -255,8 +282,11 @@ export class HookEventHandler {
 
     // --- All other events: standard agent lookup ---
     // If SessionEnd arrives for a pending external session, discard it (transient session)
-    if (normEvent.kind === 'sessionEnd' && this.sessionRouter.hasPending(event.session_id)) {
-      this.sessionRouter.discardPending(event.session_id);
+    if (
+      normEvent.kind === 'sessionEnd' &&
+      this.sessionRouter.hasPending(event.session_id, _providerId)
+    ) {
+      this.sessionRouter.discardPending(event.session_id, _providerId);
       if (debug)
         console.log(
           `[Pixel Agents] Hook: SessionEnd discarded pending external session ${event.session_id.slice(0, 8)}...`,
@@ -265,27 +295,39 @@ export class HookEventHandler {
     }
 
     // If a confirmation event arrives for a pending external session, create the agent first
-    const pending = this.sessionRouter.confirmPending(event.session_id);
+    const pending = this.sessionRouter.confirmPending(event.session_id, _providerId);
     if (pending) {
       if (debug)
         console.log(
           `[Pixel Agents] Hook: ${eventName} confirmed external session ${event.session_id.slice(0, 8)}..., notifying host`,
         );
-      this.lifecycleCallbacks.onExternalSessionDetected?.(
-        pending.sessionId,
-        pending.transcriptPath,
-        pending.cwd,
-      );
+      if (_providerId === 'claude') {
+        this.lifecycleCallbacks.onExternalSessionDetected?.(
+          pending.sessionId,
+          pending.transcriptPath,
+          pending.cwd,
+        );
+      } else {
+        this.lifecycleCallbacks.onExternalSessionDetected?.(
+          pending.sessionId,
+          pending.transcriptPath,
+          pending.cwd,
+          _providerId,
+        );
+      }
       // Re-process this event now that the agent exists
       this.handleEvent(_providerId, event);
       return;
     }
 
-    let agentId = this.sessionRouter.resolve(event.session_id);
+    let agentId = this.sessionRouter.resolve(event.session_id, _providerId);
     if (agentId === undefined) {
       for (const [id, agent] of this.agents) {
-        if (agent.sessionId === event.session_id) {
-          this.registerAgent(agent.sessionId, id);
+        if (
+          agent.sessionId === event.session_id &&
+          (agent.providerId ?? 'claude') === _providerId
+        ) {
+          this.registerAgent(agent.sessionId, id, _providerId);
           agentId = id;
           break;
         }
@@ -297,10 +339,10 @@ export class HookEventHandler {
       // hook event arrives before registerAgent is called after launchNewTerminal).
       // Silently drop events for sessions we have no record of
       // (e.g. other projects with Watch All OFF).
-      const isPending = this.sessionRouter.hasPending(event.session_id);
-      const hasBuffered = this.sessionRouter.hasBuffered(event.session_id);
+      const isPending = this.sessionRouter.hasPending(event.session_id, _providerId);
+      const hasBuffered = this.sessionRouter.hasBuffered(event.session_id, _providerId);
       const hasUnregisteredAgents = [...this.agents.values()].some(
-        (a) => a.sessionId && !this.sessionRouter.hasSession(a.sessionId),
+        (a) => a.sessionId && !this.sessionRouter.hasSession(a.sessionId, a.providerId ?? 'claude'),
       );
       if (isPending || hasBuffered || hasUnregisteredAgents) {
         if (debug)

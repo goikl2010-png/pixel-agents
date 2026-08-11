@@ -34,7 +34,12 @@ import {
   writeLayoutToFile,
 } from '../../server/src/layoutPersistence.js';
 import { PathSet } from '../../server/src/pathKey.js';
-import { claudeProvider, copyHookScript } from '../../server/src/providers/index.js';
+import {
+  claudeProvider,
+  codexProvider,
+  copyCodexHookScript,
+  copyHookScript,
+} from '../../server/src/providers/index.js';
 import { PixelAgentsServer } from '../../server/src/server.js';
 import {
   getProjectDirPath,
@@ -212,7 +217,11 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         this.runtime.hooksEnabled.current = hooksEnabled;
         if (hooksEnabled) {
           void claudeProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
-          if (!copyHookScript(this.context.extensionPath)) {
+          void codexProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+          if (
+            !copyHookScript(this.context.extensionPath) ||
+            !copyCodexHookScript(this.context.extensionPath)
+          ) {
             console.warn('[Pixel Agents] Hook script not copied, hooks may not fire');
           }
         }
@@ -308,14 +317,20 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
             serverConfig ? `http://127.0.0.1:${serverConfig.port}` : '',
             serverConfig?.token ?? '',
           );
+          void codexProvider.installHooks(
+            serverConfig ? `http://127.0.0.1:${serverConfig.port}` : '',
+            serverConfig?.token ?? '',
+          );
           const copied = copyHookScript(this.context.extensionPath);
+          const codexCopied = copyCodexHookScript(this.context.extensionPath);
           console.log(
-            copied
+            copied && codexCopied
               ? '[Pixel Agents] Hooks enabled by user'
               : '[Pixel Agents] Hooks NOT fully enabled, hook script missing',
           );
         } else {
           void claudeProvider.uninstallHooks();
+          void codexProvider.uninstallHooks();
           console.log('[Pixel Agents] Hooks disabled by user');
         }
       } else if (message.type === 'setHooksInfoShown') {
