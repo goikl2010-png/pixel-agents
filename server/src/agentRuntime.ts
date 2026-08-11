@@ -314,6 +314,13 @@ export class AgentRuntime {
     const agent = this.store.get(id);
     if (!agent) return;
 
+    // Every independently routed agent owns its provider-qualified session route.
+    // Background teammates are the intentional exception: they share the lead's
+    // session ID, so unregistering here would disconnect the lead.
+    if (!agent.spawnToolUseId) {
+      this.unregisterAgent(agent.sessionId, agent.providerId ?? 'claude');
+    }
+
     // Stop JSONL poll timer
     const jpTimer = this.jsonlPollTimers.get(id);
     if (jpTimer) {
