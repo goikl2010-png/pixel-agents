@@ -741,7 +741,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           }
           // Dismiss JSONL so external scanner doesn't re-adopt it
           this.runtime.dismissalTracker.dismiss(agent.jsonlFile);
-          this.runtime.unregisterAgent(agent.sessionId);
+          this.runtime.unregisterAgent(agent.sessionId, agent.providerId ?? 'claude');
           this.runtime.removeAgent(id);
         }
       }

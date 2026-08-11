@@ -219,7 +219,7 @@ export class AgentRuntime {
           },
         );
       },
-      onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
+      onSessionClear: (agentId, newSessionId, newTranscriptPath, providerId = 'claude') => {
         if (newTranscriptPath) {
           this.knownJsonlFiles.add(newTranscriptPath);
           reassignAgentToFile(
@@ -235,9 +235,9 @@ export class AgentRuntime {
         }
         const agent = this.store.get(agentId);
         if (agent) {
-          this.unregisterAgent(agent.sessionId);
+          this.unregisterAgent(agent.sessionId, providerId);
           agent.sessionId = newSessionId;
-          this.registerAgent(agent.sessionId, agent.id);
+          this.registerAgent(agent.sessionId, agent.id, providerId);
         }
       },
       onSessionResume: (transcriptPath) => {
@@ -267,7 +267,7 @@ export class AgentRuntime {
       onTeammateRemoved: (teammateAgentId) => {
         this.removeTeammate(teammateAgentId, 'hooks');
       },
-      onSessionEnd: (agentId) => {
+      onSessionEnd: (agentId, _reason, providerId = 'claude') => {
         const agent = this.store.get(agentId);
         if (!agent) return;
         this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
@@ -278,7 +278,7 @@ export class AgentRuntime {
         // Unnamed background spawns die with their lead's session too.
         this.subagentWatch.removeByLead(agentId);
         if (agent.isExternal) {
-          this.unregisterAgent(agent.sessionId);
+          this.unregisterAgent(agent.sessionId, providerId);
           this.removeAgent(agentId);
         }
       },
@@ -351,7 +351,7 @@ export class AgentRuntime {
     // Background teammates (spawnToolUseId set) share the LEAD's session id;
     // unregistering it would knock the lead itself out of the session router.
     if (!agent.spawnToolUseId) {
-      this.unregisterAgent(agent.sessionId);
+      this.unregisterAgent(agent.sessionId, agent.providerId ?? 'claude');
     }
     this.lifecycleCallbacks.onTeammateRemoved?.(teammateId, agent, source);
     this.removeAgent(teammateId);
@@ -395,7 +395,7 @@ export class AgentRuntime {
         console.log(`[Pixel Agents] Removing teammate ${id} (lead ${leadId} closed)`);
         this.dismissalTracker.dismiss(agent.jsonlFile);
         if (!agent.spawnToolUseId) {
-          this.unregisterAgent(agent.sessionId);
+          this.unregisterAgent(agent.sessionId, agent.providerId ?? 'claude');
         }
         this.removeAgent(id);
       }

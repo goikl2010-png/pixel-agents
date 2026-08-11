@@ -15,9 +15,25 @@ const command = () => `node "${scriptPath()}"`;
 const ours = (entry: HookEntry) => entry.command === command();
 function read(): HooksFile {
   try {
-    return JSON.parse(fs.readFileSync(configPath(), 'utf8')) as HooksFile;
-  } catch {
-    return {};
+    const value: unknown = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new TypeError('Codex hook configuration must be a JSON object');
+    }
+    const hooks = (value as HooksFile).hooks;
+    if (hooks !== undefined && (!hooks || typeof hooks !== 'object' || Array.isArray(hooks))) {
+      throw new TypeError('Codex hooks must be a JSON object');
+    }
+    for (const event of CODEX_HOOK_EVENTS) {
+      if (hooks?.[event] !== undefined && !Array.isArray(hooks[event])) {
+        throw new TypeError(`Codex hook entries for ${event} must be an array`);
+      }
+    }
+    return value as HooksFile;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new Error(`Cannot safely read Codex hook configuration at ${configPath()}`, {
+      cause: error,
+    });
   }
 }
 function writeAtomic(value: HooksFile): void {
@@ -51,8 +67,12 @@ export function uninstallHooks(): void {
   writeAtomic(value);
 }
 export function areHooksInstalled(): boolean {
-  const hooks = read().hooks;
-  return !!hooks && CODEX_HOOK_EVENTS.every((event) => hooks[event]?.some(ours));
+  try {
+    const hooks = read().hooks;
+    return !!hooks && CODEX_HOOK_EVENTS.every((event) => hooks[event]?.some(ours));
+  } catch {
+    return false;
+  }
 }
 
 export function copyCodexHookScript(extensionPath: string): boolean {

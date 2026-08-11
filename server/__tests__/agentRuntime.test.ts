@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { AgentRuntime } from '../src/agentRuntime.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
+import { codexProvider } from '../src/providers/hook/codex/codex.js';
 
 /**
  * D5 gate (tier-3 multi-server hook fan-out plan): the hook script now
@@ -73,6 +74,65 @@ describe('AgentRuntime -- D5 foreign-session gate', () => {
     const dir = untrackedDir();
     runtime.startProjectScan(dir); // marks `dir` as owned/tracked
     fireSessionStartThenStop('d5-tracked-dir', dir);
+    expect(store.size).toBe(1);
+  });
+});
+
+describe('AgentRuntime -- provider-qualified Codex cleanup', () => {
+  let runtime: AgentRuntime;
+  let store: AgentStateStore;
+
+  afterEach(() => runtime?.dispose());
+
+  function start(sessionId: string, source?: string): void {
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: sessionId,
+      cwd: path.join(os.tmpdir(), 'pixel-codex-cleanup'),
+      source,
+    });
+  }
+
+  it('removes the Codex route on SessionEnd so the same ID can be adopted again', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    runtime.watchAllSessions.current = true;
+
+    start('codex-restart');
+    expect(store.size).toBe(1);
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionEnd',
+      session_id: 'codex-restart',
+      reason: 'exit',
+    });
+    expect(store.size).toBe(0);
+
+    start('codex-restart');
+    expect(store.size).toBe(1);
+    expect([...store.values()][0].providerId).toBe(codexProvider.id);
+  });
+
+  it('reassigns a cleared Codex session without leaving either route stale', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    runtime.watchAllSessions.current = true;
+
+    start('codex-before-clear');
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionEnd',
+      session_id: 'codex-before-clear',
+      reason: 'clear',
+    });
+    start('codex-after-clear', 'clear');
+    expect([...store.values()][0].sessionId).toBe('codex-after-clear');
+
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionEnd',
+      session_id: 'codex-after-clear',
+      reason: 'exit',
+    });
+    expect(store.size).toBe(0);
+    start('codex-after-clear');
     expect(store.size).toBe(1);
   });
 });

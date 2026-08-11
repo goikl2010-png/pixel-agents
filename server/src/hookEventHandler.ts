@@ -44,11 +44,12 @@ interface SessionLifecycleCallbacks {
     agentId: number,
     newSessionId: string,
     newTranscriptPath: string | undefined,
+    providerId?: string,
   ) => void;
   /** Called when a session is resumed (--resume). Clears dismissals so the file can be re-adopted. */
   onSessionResume?: (transcriptPath: string) => void;
   /** Called when a session ends (exit/logout). */
-  onSessionEnd?: (agentId: number, reason: string) => void;
+  onSessionEnd?: (agentId: number, reason: string, providerId?: string) => void;
   /** Called when an Agent Teams teammate is detected via SubagentStart hook.
    *  Triggers scanning of the session's subagents/ directory for the teammate's JSONL. */
   onTeammateDetected?: (parentAgentId: number, sessionId: string, agentType: string) => void;
@@ -234,7 +235,12 @@ export class HookEventHandler {
               );
               this.sessionRouter.unregister(agent.sessionId, _providerId);
               this.registerAgent(event.session_id, id, _providerId);
-              this.lifecycleCallbacks.onSessionClear?.(id, event.session_id, transcriptPath);
+              this.lifecycleCallbacks.onSessionClear?.(
+                id,
+                event.session_id,
+                transcriptPath,
+                _providerId,
+              );
               return;
             }
           }
@@ -368,7 +374,7 @@ export class HookEventHandler {
     // retain their raw payload for the team-routing handler's identity extraction.
     switch (normEvent.kind) {
       case 'sessionEnd':
-        return this.handleSessionEnd(normEvent, agent, agentId);
+        return this.handleSessionEnd(normEvent, agent, agentId, _providerId);
       case 'toolStart':
         return this.handlePreToolUse(normEvent, agent, agentId);
       case 'toolEnd':
@@ -412,6 +418,7 @@ export class HookEventHandler {
     normEvent: Extract<AgentEvent, { kind: 'sessionEnd' }>,
     agent: AgentState,
     agentId: number,
+    providerId: string,
   ): void {
     const reason = normEvent.reason;
     if (debug)
@@ -434,14 +441,14 @@ export class HookEventHandler {
       setTimeout(() => {
         if (agent.pendingClear) {
           agent.pendingClear = false;
-          this.lifecycleCallbacks.onSessionEnd?.(agentId, reason);
+          this.lifecycleCallbacks.onSessionEnd?.(agentId, reason, providerId);
         }
       }, SESSION_END_GRACE_MS);
     } else {
       // Immediate cleanup for exit/logout. onSessionEnd → removeTeammates in the
       // ViewProvider cleans up all teammates of this lead at once.
       this.markAgentWaiting(agent, agentId);
-      this.lifecycleCallbacks.onSessionEnd?.(agentId, reason ?? 'unknown');
+      this.lifecycleCallbacks.onSessionEnd?.(agentId, reason ?? 'unknown', providerId);
     }
   }
 

@@ -45,4 +45,32 @@ describe('Codex hook installer', () => {
     const removed = JSON.parse(fs.readFileSync(config, 'utf8'));
     expect(removed).toEqual({ custom: true, hooks: { SessionStart: [{ command: 'other' }] } });
   });
+
+  it('preserves malformed existing configuration instead of replacing it', () => {
+    const malformed = '{ "hooks": invalid';
+    fs.writeFileSync(config, malformed);
+
+    expect(() => installHooks()).toThrow(/Cannot safely read Codex hook configuration/);
+    expect(() => uninstallHooks()).toThrow(/Cannot safely read Codex hook configuration/);
+    expect(areHooksInstalled()).toBe(false);
+    expect(fs.readFileSync(config, 'utf8')).toBe(malformed);
+  });
+
+  it('preserves structurally invalid existing hook configuration', () => {
+    const invalid = JSON.stringify({ custom: true, hooks: { SessionStart: { command: 'other' } } });
+    fs.writeFileSync(config, invalid);
+
+    expect(() => installHooks()).toThrow(/Cannot safely read Codex hook configuration/);
+    expect(fs.readFileSync(config, 'utf8')).toBe(invalid);
+  });
+
+  it('does not write when existing configuration is unreadable', () => {
+    const unreadable = path.join(dir, 'config-directory');
+    fs.mkdirSync(unreadable);
+    process.env.PIXEL_AGENTS_CODEX_HOOKS_PATH = unreadable;
+
+    expect(() => installHooks()).toThrow(/Cannot safely read Codex hook configuration/);
+    expect(fs.statSync(unreadable).isDirectory()).toBe(true);
+    expect(fs.readdirSync(unreadable)).toEqual([]);
+  });
 });
