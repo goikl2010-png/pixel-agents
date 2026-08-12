@@ -2,6 +2,18 @@ import * as path from 'path';
 
 import type { AgentEvent, HookProvider } from '../../../../../core/src/provider.js';
 import { areHooksInstalled, installHooks, uninstallHooks } from './codexHookInstaller.js';
+import {
+  CODEX_EMPLOYEE_IDENTITIES,
+  CODEX_EMPLOYEE_IDENTITY_FIELD,
+  type CodexEmployeeIdentity,
+} from './constants.js';
+
+function normalizeEmployeeIdentity(value: unknown): CodexEmployeeIdentity | undefined {
+  return typeof value === 'string' &&
+    (CODEX_EMPLOYEE_IDENTITIES as readonly string[]).includes(value)
+    ? (value as CodexEmployeeIdentity)
+    : undefined;
+}
 
 function normalizeHookEvent(
   raw: Record<string, unknown>,
@@ -18,6 +30,7 @@ function normalizeHookEvent(
           kind: 'sessionStart',
           source: typeof raw.source === 'string' ? raw.source : undefined,
           cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
+          employeeIdentity: normalizeEmployeeIdentity(raw[CODEX_EMPLOYEE_IDENTITY_FIELD]),
         },
       };
     case 'UserPromptSubmit':

@@ -2,6 +2,32 @@
 
 Pixel Agents can receive supported Codex lifecycle hooks at `/api/hooks/codex` alongside the existing Claude endpoint. Hook payloads are authenticated with the same per-server bearer token and sessions are keyed as `codex:<session_id>`, preventing collisions with Claude IDs.
 
+## Employee identity contract
+
+Set `PIXEL_AGENTS_EMPLOYEE_IDENTITY` in the environment of the Codex process to exactly one canonical value: `Alex`, `Nova`, `Pixel`, or `Atlas`. The installed hook copies that value into the authenticated hook payload as `pixel_agents_employee_identity`; the Codex provider validates it and displays it through the existing character-name surface. This metadata is descriptive only and is not an authentication or authorization credential.
+
+PowerShell examples:
+
+```powershell
+$env:PIXEL_AGENTS_EMPLOYEE_IDENTITY='Alex'; codex
+$env:PIXEL_AGENTS_EMPLOYEE_IDENTITY='Nova'; codex
+$env:PIXEL_AGENTS_EMPLOYEE_IDENTITY='Pixel'; codex
+$env:PIXEL_AGENTS_EMPLOYEE_IDENTITY='Atlas'; codex
+```
+
+POSIX shell examples:
+
+```sh
+PIXEL_AGENTS_EMPLOYEE_IDENTITY=Alex codex
+PIXEL_AGENTS_EMPLOYEE_IDENTITY=Nova codex
+PIXEL_AGENTS_EMPLOYEE_IDENTITY=Pixel codex
+PIXEL_AGENTS_EMPLOYEE_IDENTITY=Atlas codex
+```
+
+Identity is bound when a new `codex:<session_id>` is adopted and remains unchanged for that live session. Ending or removing the session deletes the character and its association; a new session ID starts with only its own metadata. Multiple concurrent sessions may intentionally use the same employee value: each remains a distinct character routed by its own provider-qualified session ID, and each displays the same declared label.
+
+The contract is exact and case-sensitive. Missing, empty, non-string, altered-case, unknown, or markup-shaped values fall back to the existing generic Codex character without failing hook delivery or affecting another session. Environment inheritance is the only automatic propagation: launchers that strip environment variables must explicitly preserve this variable. Identity does not infer employee identity from prompts, directories, transcripts, or other content.
+
 ## Setup and trust
 
 Starting Pixel Agents installs entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`, and `SessionEnd` in `~/.codex/hooks.json` and copies a best-effort forwarder to `~/.pixel-agents/hooks/codex-hook.js`. Existing hooks and unrelated configuration are preserved. Install and uninstall are idempotent and use an atomic replacement write.
@@ -20,4 +46,4 @@ Codex transcripts remain optional diagnostics and are not parsed as a Phase 1 co
 
 ## Local verification
 
-Run `npm run check-types`, `npm run test:server`, and `npm run build`. With a trusted Codex hook configuration and Pixel Agents running, start a Codex session in a tracked workspace and verify start, prompt/tool activity, stop/waiting, and eventual end behavior.
+Run `npm run check-types`, `npm run test:server`, and `npm run build`. With a trusted Codex hook configuration and Pixel Agents running, launch sessions using the examples above and verify all four labels, independent activity, duplicate-label independence, generic fallback with the variable unset or invalid, and eventual removal. Confirm a Claude session with the same raw session ID remains isolated.

@@ -46,4 +46,27 @@ describe('codexProvider', () => {
       codexProvider.normalizeHookEvent({ hook_event_name: 'PreToolUse', session_id: 's' }),
     ).toBeNull();
   });
+
+  it.each(['Alex', 'Nova', 'Pixel', 'Atlas'])('validates canonical identity %s', (identity) => {
+    expect(
+      codexProvider.normalizeHookEvent({
+        hook_event_name: 'SessionStart',
+        session_id: 's',
+        pixel_agents_employee_identity: identity,
+      })?.event,
+    ).toMatchObject({ kind: 'sessionStart', employeeIdentity: identity });
+  });
+
+  it.each([undefined, '', 'nova', 'Admin', { name: 'Alex' }, 'Alex<script>'])(
+    'falls back safely for missing or unsupported identity %j',
+    (identity) => {
+      expect(
+        codexProvider.normalizeHookEvent({
+          hook_event_name: 'SessionStart',
+          session_id: 's',
+          pixel_agents_employee_identity: identity,
+        })?.event,
+      ).toMatchObject({ kind: 'sessionStart', employeeIdentity: undefined });
+    },
+  );
 });
