@@ -38,6 +38,7 @@ interface SessionLifecycleCallbacks {
     transcriptPath: string | undefined,
     cwd: string,
     providerId?: string,
+    employeeIdentity?: string,
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -256,6 +257,7 @@ export class HookEventHandler {
             undefined,
             cwd ?? '',
             _providerId,
+            normEvent.employeeIdentity,
           );
           return;
         }

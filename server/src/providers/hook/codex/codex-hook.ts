@@ -11,6 +11,7 @@ import {
 } from '../../../constants.js';
 import type { ServerConfig, ServerTarget } from '../../../serverConfig.js';
 import { isServerConfig, isServerTarget } from '../../../serverConfig.js';
+import { CODEX_EMPLOYEE_IDENTITY_ENV, CODEX_EMPLOYEE_IDENTITY_FIELD } from './constants.js';
 
 const SERVER_JSON = path.join(os.homedir(), SERVER_JSON_DIR, SERVER_JSON_NAME);
 const SERVERS_REGISTRY_DIR = path.join(os.homedir(), SERVER_JSON_DIR, SERVERS_DIR);
@@ -159,6 +160,9 @@ async function main(): Promise<void> {
     hookDebug('exit reason=bad-stdin');
     process.exit(0);
   }
+
+  const employeeIdentity = process.env[CODEX_EMPLOYEE_IDENTITY_ENV];
+  if (employeeIdentity !== undefined) data[CODEX_EMPLOYEE_IDENTITY_FIELD] = employeeIdentity;
 
   const eventName = (data.hook_event_name as string | undefined) ?? '?';
   const sid = (data.session_id as string | undefined)?.slice(0, 8) ?? '?';

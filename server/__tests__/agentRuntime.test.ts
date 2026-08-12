@@ -84,12 +84,13 @@ describe('AgentRuntime -- provider-qualified Codex cleanup', () => {
 
   afterEach(() => runtime?.dispose());
 
-  function start(sessionId: string, source?: string): void {
+  function start(sessionId: string, source?: string, employeeIdentity?: string): void {
     runtime.handleHookEvent('codex', {
       hook_event_name: 'SessionStart',
       session_id: sessionId,
       cwd: path.join(os.tmpdir(), 'pixel-codex-cleanup'),
       source,
+      pixel_agents_employee_identity: employeeIdentity,
     });
   }
 
@@ -203,5 +204,59 @@ describe('AgentRuntime -- provider-qualified Codex cleanup', () => {
     expect(store.size).toBe(0);
     start('codex-after-clear');
     expect(store.size).toBe(1);
+  });
+
+  it('maps simultaneous and duplicate employee identities independently', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    runtime.watchAllSessions.current = true;
+
+    start('alex-1', undefined, 'Alex');
+    start('nova-1', undefined, 'Nova');
+    start('pixel-1', undefined, 'Pixel');
+    start('atlas-1', undefined, 'Atlas');
+    start('nova-2', undefined, 'Nova');
+
+    expect([...store.values()].map((agent) => [agent.sessionId, agent.agentName])).toEqual([
+      ['alex-1', 'Alex'],
+      ['nova-1', 'Nova'],
+      ['pixel-1', 'Pixel'],
+      ['atlas-1', 'Atlas'],
+      ['nova-2', 'Nova'],
+    ]);
+
+    runtime.handleHookEvent('codex', { hook_event_name: 'Stop', session_id: 'nova-2' });
+    expect([...store.values()].find((agent) => agent.sessionId === 'nova-2')?.isWaiting).toBe(true);
+    expect([...store.values()].find((agent) => agent.sessionId === 'nova-1')?.isWaiting).toBe(
+      false,
+    );
+  });
+
+  it('keeps identity stable for a live session and clears it on removal', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    runtime.watchAllSessions.current = true;
+
+    start('stable-id', undefined, 'Alex');
+    start('stable-id', undefined, 'Atlas');
+    expect([...store.values()][0].agentName).toBe('Alex');
+
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionEnd',
+      session_id: 'stable-id',
+      reason: 'exit',
+    });
+    start('new-id', undefined, 'Pixel');
+    expect([...store.values()][0]).toMatchObject({ sessionId: 'new-id', agentName: 'Pixel' });
+  });
+
+  it('retains generic Codex behavior for missing or malformed identity', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    runtime.watchAllSessions.current = true;
+
+    start('generic');
+    start('malformed', undefined, 'alex');
+    expect([...store.values()].map((agent) => agent.agentName)).toEqual([undefined, undefined]);
   });
 });

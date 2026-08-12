@@ -53,6 +53,8 @@ export type AgentEvent =
   | {
       kind: 'sessionStart';
       source?: string;
+      /** Validated, display-only employee identity supplied by a provider. */
+      employeeIdentity?: string;
       /** For external-session adoption: path to the session's transcript file
        *  (if the provider uses one). Undefined for providers without transcripts. */
       transcriptPath?: string;
