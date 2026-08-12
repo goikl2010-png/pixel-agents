@@ -22,7 +22,12 @@ import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
-import { claudeProvider, copyHookScript } from './providers/index.js';
+import {
+  claudeProvider,
+  codexProvider,
+  copyCodexHookScript,
+  copyHookScript,
+} from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -132,14 +137,20 @@ async function main(): Promise<void> {
           `http://127.0.0.1:${currentConfig.port}`,
           currentConfig.token,
         );
+        await codexProvider.installHooks(
+          `http://127.0.0.1:${currentConfig.port}`,
+          currentConfig.token,
+        );
         const copied = copyHookScript(packageRoot);
+        const codexCopied = copyCodexHookScript(packageRoot);
         console.log(
-          copied
+          copied && codexCopied
             ? '[Pixel Agents] Hooks installed (user toggle)'
             : '[Pixel Agents] Hooks NOT installed (user toggle), hook script missing',
         );
       } else {
         await claudeProvider.uninstallHooks();
+        await codexProvider.uninstallHooks();
         console.log('[Pixel Agents] Hooks uninstalled (user toggle)');
       }
     };
@@ -202,9 +213,11 @@ async function main(): Promise<void> {
     if (runtime.hooksEnabled.current) {
       try {
         await claudeProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+        await codexProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
         const copied = copyHookScript(packageRoot);
+        const codexCopied = copyCodexHookScript(packageRoot);
         console.log(
-          copied
+          copied && codexCopied
             ? '[Pixel Agents] Hooks installed'
             : '[Pixel Agents] Hooks NOT installed, hook script missing',
         );

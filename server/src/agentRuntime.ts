@@ -38,6 +38,7 @@ import type { HookEvent } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
+import { codexProvider } from './providers/index.js';
 import { SessionRouter } from './sessionRouter.js';
 import { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
@@ -149,11 +150,12 @@ export class AgentRuntime {
       provider,
       new SessionRouter(),
       this.watchAllSessions,
+      provider.id === codexProvider.id ? [] : [codexProvider],
     );
 
     // Wire hook lifecycle callbacks to shared agent operations
     this.hookEventHandler.setLifecycleCallbacks({
-      onExternalSessionDetected: (sessionId, transcriptPath, cwd) => {
+      onExternalSessionDetected: (sessionId, transcriptPath, cwd, providerId = 'claude') => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
         // Teammate session of a tracked lead? Attach it as a teammate character
         // instead of adopting a generic external agent -- and regardless of the
@@ -211,10 +213,13 @@ export class AgentRuntime {
           this.waitingTimers,
           this.permissionTimers,
           () => this.store.persist(),
-          (agent) => this.registerAgent(agent.sessionId, agent.id),
+          (agent) => {
+            agent.providerId = providerId;
+            this.registerAgent(agent.sessionId, agent.id, providerId);
+          },
         );
       },
-      onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
+      onSessionClear: (agentId, newSessionId, newTranscriptPath, providerId = 'claude') => {
         if (newTranscriptPath) {
           this.knownJsonlFiles.add(newTranscriptPath);
           reassignAgentToFile(
@@ -230,9 +235,9 @@ export class AgentRuntime {
         }
         const agent = this.store.get(agentId);
         if (agent) {
-          this.unregisterAgent(agent.sessionId);
+          this.unregisterAgent(agent.sessionId, providerId);
           agent.sessionId = newSessionId;
-          this.registerAgent(agent.sessionId, agent.id);
+          this.registerAgent(agent.sessionId, agent.id, providerId);
         }
       },
       onSessionResume: (transcriptPath) => {
@@ -262,7 +267,7 @@ export class AgentRuntime {
       onTeammateRemoved: (teammateAgentId) => {
         this.removeTeammate(teammateAgentId, 'hooks');
       },
-      onSessionEnd: (agentId) => {
+      onSessionEnd: (agentId, _reason, providerId = 'claude') => {
         const agent = this.store.get(agentId);
         if (!agent) return;
         this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
@@ -273,7 +278,7 @@ export class AgentRuntime {
         // Unnamed background spawns die with their lead's session too.
         this.subagentWatch.removeByLead(agentId);
         if (agent.isExternal) {
-          this.unregisterAgent(agent.sessionId);
+          this.unregisterAgent(agent.sessionId, providerId);
           this.removeAgent(agentId);
         }
       },
@@ -293,13 +298,13 @@ export class AgentRuntime {
   }
 
   /** Register an agent with the hook event handler for session->agent mapping. */
-  registerAgent(sessionId: string, agentId: number): void {
-    this.hookEventHandler.registerAgent(sessionId, agentId);
+  registerAgent(sessionId: string, agentId: number, providerId = 'claude'): void {
+    this.hookEventHandler.registerAgent(sessionId, agentId, providerId);
   }
 
   /** Unregister an agent from the hook event handler. */
-  unregisterAgent(sessionId: string): void {
-    this.hookEventHandler.unregisterAgent(sessionId);
+  unregisterAgent(sessionId: string, providerId = 'claude'): void {
+    this.hookEventHandler.unregisterAgent(sessionId, providerId);
   }
 
   // ── Agent removal (shared cleanup) ──
@@ -308,6 +313,13 @@ export class AgentRuntime {
   removeAgent(id: number): void {
     const agent = this.store.get(id);
     if (!agent) return;
+
+    // Every independently routed agent owns its provider-qualified session route.
+    // Background teammates are the intentional exception: they share the lead's
+    // session ID, so unregistering here would disconnect the lead.
+    if (!agent.spawnToolUseId) {
+      this.unregisterAgent(agent.sessionId, agent.providerId ?? 'claude');
+    }
 
     // Stop JSONL poll timer
     const jpTimer = this.jsonlPollTimers.get(id);
@@ -346,7 +358,7 @@ export class AgentRuntime {
     // Background teammates (spawnToolUseId set) share the LEAD's session id;
     // unregistering it would knock the lead itself out of the session router.
     if (!agent.spawnToolUseId) {
-      this.unregisterAgent(agent.sessionId);
+      this.unregisterAgent(agent.sessionId, agent.providerId ?? 'claude');
     }
     this.lifecycleCallbacks.onTeammateRemoved?.(teammateId, agent, source);
     this.removeAgent(teammateId);
@@ -390,7 +402,7 @@ export class AgentRuntime {
         console.log(`[Pixel Agents] Removing teammate ${id} (lead ${leadId} closed)`);
         this.dismissalTracker.dismiss(agent.jsonlFile);
         if (!agent.spawnToolUseId) {
-          this.unregisterAgent(agent.sessionId);
+          this.unregisterAgent(agent.sessionId, agent.providerId ?? 'claude');
         }
         this.removeAgent(id);
       }

@@ -39,7 +39,7 @@ function copyAssets() {
  * Produces a self-contained CJS file with shebang for Claude Code to execute.
  */
 function buildHooks() {
-  const entry = path.join(
+  const claudeEntry = path.join(
     __dirname,
     'server',
     'src',
@@ -49,9 +49,19 @@ function buildHooks() {
     'hooks',
     'claude-hook.ts',
   );
-  if (!fs.existsSync(entry)) return;
+  const codexEntry = path.join(
+    __dirname,
+    'server',
+    'src',
+    'providers',
+    'hook',
+    'codex',
+    'codex-hook.ts',
+  );
+  const entries = [claudeEntry, codexEntry].filter((entry) => fs.existsSync(entry));
+  if (entries.length === 0) return;
   require('esbuild').buildSync({
-    entryPoints: [entry],
+    entryPoints: entries,
     bundle: true,
     platform: 'node',
     target: 'node18',

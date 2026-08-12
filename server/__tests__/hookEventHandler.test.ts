@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import { HookEventHandler } from '../src/hookEventHandler.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
+import { codexProvider } from '../src/providers/hook/codex/codex.js';
 import { SessionRouter } from '../src/sessionRouter.js';
 import type { AgentState } from '../src/types.js';
 
@@ -67,7 +68,48 @@ describe('HookEventHandler', () => {
       permissionTimers,
       claudeProvider,
       new SessionRouter(),
+      undefined,
+      [codexProvider],
     );
+  });
+
+  it('routes Codex lifecycle once without colliding with Claude', () => {
+    const detected = vi.fn(
+      (sessionId: string, _path: string | undefined, cwd: string, providerId?: string) => {
+        const id = providerId === 'codex' ? 2 : 1;
+        const agent = createTestAgent({ id, sessionId, projectDir: cwd, providerId });
+        agents.set(id, agent);
+        handler.registerAgent(sessionId, id, providerId);
+      },
+    );
+    handler.setLifecycleCallbacks({ onExternalSessionDetected: detected });
+    agents.set(1, createTestAgent({ id: 1, sessionId: 'same', providerId: 'claude' }));
+    handler.registerAgent('same', 1, 'claude');
+
+    handler.handleEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'same',
+      cwd: '/test',
+    });
+    handler.handleEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'same',
+      cwd: '/test',
+    });
+    handler.handleEvent('codex', { hook_event_name: 'Stop', session_id: 'same' });
+
+    expect(detected).toHaveBeenCalledTimes(1);
+    expect(agents.size).toBe(2);
+    expect(agents.get(2)?.isWaiting).toBe(true);
+  });
+
+  it('drops unknown providers without changing agents', () => {
+    handler.handleEvent('unknown', {
+      hook_event_name: 'SessionStart',
+      session_id: 'bad',
+      cwd: '/test',
+    });
+    expect(agents.size).toBe(0);
   });
 
   // ── PermissionRequest ───────────────────────────────────────
@@ -364,7 +406,12 @@ describe('HookEventHandler', () => {
       transcript_path: '/projects/test/new-sess.jsonl',
     });
 
-    expect(onSessionClear).toHaveBeenCalledWith(1, 'new-sess', '/projects/test/new-sess.jsonl');
+    expect(onSessionClear).toHaveBeenCalledWith(
+      1,
+      'new-sess',
+      '/projects/test/new-sess.jsonl',
+      'claude',
+    );
     expect(agent.pendingClear).toBe(false);
   });
 
@@ -414,7 +461,7 @@ describe('HookEventHandler', () => {
 
     // Exit is immediate, no pendingClear delay
     expect(agent.isWaiting).toBe(true);
-    expect(onSessionEnd).toHaveBeenCalledWith(1, 'exit');
+    expect(onSessionEnd).toHaveBeenCalledWith(1, 'exit', 'claude');
   });
 
   it('SessionEnd(reason=resume) delays onSessionEnd for SESSION_END_GRACE_MS', async () => {
@@ -438,7 +485,7 @@ describe('HookEventHandler', () => {
 
     // Wait for grace period (2000ms + margin)
     await new Promise((r) => setTimeout(r, 2500));
-    expect(onSessionEnd).toHaveBeenCalledWith(1, 'resume');
+    expect(onSessionEnd).toHaveBeenCalledWith(1, 'resume', 'claude');
     expect(agent.pendingClear).toBe(false);
   });
 
@@ -633,6 +680,7 @@ describe('HookEventHandler', () => {
       1,
       'new-resume-sess',
       '/projects/test/new-resume-sess.jsonl',
+      'claude',
     );
 
     // Grace timer fires but pendingClear is already false -> no-op
@@ -677,6 +725,7 @@ describe('HookEventHandler', () => {
       1,
       'new-resume-sess',
       '/projects/test/new-resume-sess.jsonl',
+      'claude',
     );
     expect(resumingAgent.pendingClear).toBe(false);
     // Agent 2 should be untouched
@@ -744,7 +793,7 @@ describe('HookEventHandler', () => {
       cwd: '/projects/test',
     });
 
-    expect(onSessionClear).toHaveBeenCalledWith(1, 'resumed-sess', undefined);
+    expect(onSessionClear).toHaveBeenCalledWith(1, 'resumed-sess', undefined, 'claude');
     expect(agent.pendingClear).toBe(false);
   });
 

@@ -38,6 +38,13 @@ describe('SessionRouter', () => {
       expect(router.hasSession('sess-1')).toBe(true);
       expect(router.hasSession('sess-2')).toBe(false);
     });
+
+    it('namespaces identical session IDs by provider', () => {
+      router.register('same', 1, 'claude');
+      router.register('same', 2, 'codex');
+      expect(router.resolve('same', 'claude')).toBe(1);
+      expect(router.resolve('same', 'codex')).toBe(2);
+    });
   });
 
   // ── Pending external sessions ──────────────────────────────────────
