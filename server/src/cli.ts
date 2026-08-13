@@ -10,6 +10,11 @@
 
 import * as path from 'path';
 
+import {
+  discoverActionableTask,
+  EMPLOYEE_IDENTITIES,
+  type EmployeeIdentity,
+} from './actionableTaskDiscovery.js';
 import { AgentRuntime } from './agentRuntime.js';
 import { AgentStateStore } from './agentStateStore.js';
 import {
@@ -37,6 +42,8 @@ export interface CliArgs {
    *  can run at once without a collision. --port picks a fixed one. */
   port?: number;
   host: string;
+  discoverTask?: EmployeeIdentity;
+  companyTasksRoot?: string;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -65,16 +72,31 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (argv[i] === '--host' && argv[i + 1]) {
       args.host = argv[i + 1];
       i++;
+    } else if (argv[i] === '--discover-task') {
+      const identity = argv[i + 1];
+      if (!EMPLOYEE_IDENTITIES.includes(identity as EmployeeIdentity)) {
+        throw new CliArgsError(
+          `Invalid --discover-task identity ${JSON.stringify(identity)}: expected Alex, Nova, Pixel, or Atlas.`,
+        );
+      }
+      args.discoverTask = identity as EmployeeIdentity;
+      i++;
+    } else if (argv[i] === '--company-tasks-root' && argv[i + 1]) {
+      args.companyTasksRoot = argv[i + 1];
+      i++;
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
 Options:
   --port, -p <number>   Port to listen on (default: OS-assigned ephemeral port)
   --host <string>       Host to bind to (default: 127.0.0.1)
+  --discover-task <id>  Report the employee's authoritative actionable task
+  --company-tasks-root  Root containing the authoritative tasks directories
   --help                Show this help message`);
       process.exit(0);
     }
   }
+
   return args;
 }
 
@@ -87,6 +109,23 @@ async function main(): Promise<void> {
   } catch (err) {
     console.error(`[Pixel Agents] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+  }
+
+  if (args.discoverTask) {
+    if (!args.companyTasksRoot) {
+      console.error('[Pixel Agents] --discover-task requires --company-tasks-root.');
+      process.exitCode = 1;
+      return;
+    }
+    const tasksRoot = path.resolve(args.companyTasksRoot, 'tasks');
+    const result = await discoverActionableTask(args.discoverTask, {
+      backlog: path.join(tasksRoot, 'backlog'),
+      active: path.join(tasksRoot, 'active'),
+      review: path.join(tasksRoot, 'review'),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    process.exitCode = result.outcome === 'found' || result.outcome === 'none' ? 0 : 1;
+    return;
   }
 
   // dist/ contains both the CLI bundle and the assets/ + webview/ directories
