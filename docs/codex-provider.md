@@ -28,6 +28,25 @@ Identity is bound when a new `codex:<session_id>` is adopted and remains unchang
 
 The contract is exact and case-sensitive. Missing, empty, non-string, altered-case, unknown, or markup-shaped values fall back to the existing generic Codex character without failing hook delivery or affecting another session. Environment inheritance is the only automatic propagation: launchers that strip environment variables must explicitly preserve this variable. Identity does not infer employee identity from prompts, directories, transcripts, or other content.
 
+## Read-only actionable-task discovery
+
+The standalone CLI can combine that same canonical identity with authoritative AI Company task records:
+
+```powershell
+npx pixel-agents --discover-task Nova --company-tasks-root C:\AI-Company
+```
+
+The configurable root must contain `tasks/backlog`, `tasks/active`, and `tasks/review`. The resolver reads Markdown fields rather than inferring state from directory placement. It validates the lifecycle mapping: Alex owns `BACKLOG`, `APPROVED`, and `BLOCKED`; Nova owns `DEVELOPMENT` and `CHANGES_REQUIRED`; Pixel owns `READY_FOR_QA`, `QA`, and `QA_RETEST`; Atlas owns `READY_FOR_REVIEW` and `REVIEW`. `COMPLETED` is non-actionable, and `BLOCKED` must be owned by Alex with a valid nonterminal Resume state.
+
+The command prints deterministic JSON with outcome `found`, `none`, `conflict`, or `error`. Conflicts and malformed or contradictory records produce a nonzero exit code and are never guessed through. Discovery only reads files: it does not edit tasks, advance lifecycle states, contact GitHub, send handoffs, start sessions, or weaken QA, review, approval, merge, and closure gates.
+
+Developer verification:
+
+```sh
+npx vitest run server/__tests__/actionableTaskDiscovery.test.ts server/__tests__/cli.test.ts
+npm run check-types
+```
+
 ## Setup and trust
 
 Starting Pixel Agents installs entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`, and `SessionEnd` in `~/.codex/hooks.json` and copies a best-effort forwarder to `~/.pixel-agents/hooks/codex-hook.js`. Existing hooks and unrelated configuration are preserved. Install and uninstall are idempotent and use an atomic replacement write.

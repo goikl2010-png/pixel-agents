@@ -64,6 +64,19 @@ function runCli(args: string[]): Promise<{ code: number | null; stdout: string; 
 }
 
 describe('parseArgs', () => {
+  it('parses read-only actionable-task discovery arguments', () => {
+    expect(
+      parseArgs(['--discover-task', 'Nova', '--company-tasks-root', 'C:\\AI-Company']),
+    ).toEqual({
+      host: '127.0.0.1',
+      discoverTask: 'Nova',
+      companyTasksRoot: 'C:\\AI-Company',
+    });
+  });
+
+  it('rejects a noncanonical discovery identity', () => {
+    expect(() => parseArgs(['--discover-task', 'nova'])).toThrow(CliArgsError);
+  });
   // 1. No --port -> ephemeral default (unset), never a hardcoded port
   it('defaults port to undefined (ephemeral) when --port is omitted', () => {
     const args = parseArgs([]);
