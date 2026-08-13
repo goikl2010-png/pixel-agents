@@ -66,6 +66,36 @@ it('reports deterministic multiple-match conflicts', async () => {
     expect(result.tasks.map((task) => task.taskId)).toEqual(['TASK-1', 'TASK-9']);
 });
 it.each([
+  [record('TASK-1', 'Nova', 'DEVELOPMENT'), record('TASK-1', 'Alex', 'COMPLETED')],
+  [record('TASK-1', 'Nova', 'CHANGES_REQUIRED'), record('TASK-1', 'Pixel', 'QA')],
+  [record('TASK-1', 'Nova', 'DEVELOPMENT'), record('TASK-1', 'Nova', 'DEVELOPMENT')],
+])('rejects duplicate Task IDs across authoritative files', async (first, second) => {
+  const locations = await fixture();
+  await writeFile(path.join(locations.active, 'first.md'), first);
+  await writeFile(path.join(locations.review, 'second.md'), second);
+  await expect(discoverActionableTask('Nova', locations)).resolves.toMatchObject({
+    outcome: 'error',
+    errors: [expect.stringContaining('duplicate Task ID "TASK-1"')],
+  });
+});
+it.each([
+  ['Task ID', 'TASK-1'],
+  ['Owner', 'Nova'],
+  ['Owner', 'Alex'],
+  ['Current state', 'DEVELOPMENT'],
+  ['Current state', 'CHANGES_REQUIRED'],
+  ['Resume state (required only when BLOCKED)', 'None'],
+  ['Resume state (required only when BLOCKED)', 'QA'],
+])('rejects duplicate %s fields with matching or contradictory values', async (name, value) => {
+  const locations = await fixture();
+  const markdown = `${record('TASK-1', 'Nova', 'DEVELOPMENT')}- **${name}:** ${value}\n`;
+  await writeFile(path.join(locations.active, 'duplicate-field.md'), markdown);
+  await expect(discoverActionableTask('Nova', locations)).resolves.toMatchObject({
+    outcome: 'error',
+    errors: [expect.stringContaining(`duplicate ${name} fields`)],
+  });
+});
+it.each([
   record('TASK-1', 'Nova', 'QA'),
   record('TASK-1', 'Alex', 'BLOCKED'),
   record('TASK-1', 'Alex', 'BLOCKED', 'COMPLETED'),

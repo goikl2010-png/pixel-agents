@@ -36,13 +36,14 @@ export type TaskDiscoveryResult =
   | { outcome: 'conflict'; employee: EmployeeIdentity; tasks: ActionableTask[] }
   | { outcome: 'error'; employee: EmployeeIdentity; errors: string[] };
 
-function field(markdown: string, name: string): string | undefined {
+function field(markdown: string, name: string): string | undefined | string[] {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = markdown.match(
-    new RegExp(`^\\s*-?\\s*\\*\\*${escaped}:\\*\\*\\s*(.+?)\\s*$`, 'im'),
-  );
-  if (!match) return undefined;
-  const value = match[1].trim().replace(/^`|`$/g, '');
+  const matches = [
+    ...markdown.matchAll(new RegExp(`^\\s*-?\\s*\\*\\*${escaped}:\\*\\*\\s*(.+?)\\s*$`, 'gim')),
+  ];
+  if (matches.length === 0) return undefined;
+  if (matches.length > 1) return matches.map((match) => match[1].trim());
+  const value = matches[0][1].trim().replace(/^`|`$/g, '');
   return value === 'None' ? undefined : value;
 }
 
@@ -51,6 +52,11 @@ function parseTask(markdown: string, sourcePath: string): ActionableTask | strin
   const owner = field(markdown, 'Owner');
   const currentState = field(markdown, 'Current state');
   const resumeState = field(markdown, 'Resume state (required only when BLOCKED)');
+  if (Array.isArray(taskId)) return `${sourcePath}: duplicate Task ID fields`;
+  if (Array.isArray(owner)) return `${sourcePath}: duplicate Owner fields`;
+  if (Array.isArray(currentState)) return `${sourcePath}: duplicate Current state fields`;
+  if (Array.isArray(resumeState))
+    return `${sourcePath}: duplicate Resume state (required only when BLOCKED) fields`;
   if (!taskId || !owner || !currentState)
     return `${sourcePath}: missing Task ID, Owner, or Current state`;
   if (!EMPLOYEE_IDENTITIES.includes(owner as EmployeeIdentity))
@@ -100,6 +106,17 @@ export async function discoverActionableTask(
     } catch (error) {
       errors.push(`${sourcePath}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  if (errors.length) return { outcome: 'error', employee, errors: errors.sort() };
+  const sourcesByTaskId = new Map<string, string[]>();
+  for (const task of tasks) {
+    const sources = sourcesByTaskId.get(task.taskId) ?? [];
+    sources.push(task.sourcePath);
+    sourcesByTaskId.set(task.taskId, sources);
+  }
+  for (const [taskId, sources] of sourcesByTaskId) {
+    if (sources.length > 1)
+      errors.push(`duplicate Task ID ${JSON.stringify(taskId)}: ${sources.sort().join(', ')}`);
   }
   if (errors.length) return { outcome: 'error', employee, errors: errors.sort() };
   const matches = tasks
