@@ -27,6 +27,7 @@ import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
+import { planHandoffTransition } from './handoffTransitionPlanner.js';
 import {
   claudeProvider,
   codexProvider,
@@ -44,6 +45,13 @@ export interface CliArgs {
   host: string;
   discoverTask?: EmployeeIdentity;
   companyTasksRoot?: string;
+  planHandoff?: string;
+  blockedReporter?: EmployeeIdentity;
+  blockedBlocker?: string;
+  blockedResolution?: string;
+  blockedEvidence?: string;
+  blockedResumeState?: string;
+  alexAuthorizedResume?: boolean;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -84,6 +92,30 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (argv[i] === '--company-tasks-root' && argv[i + 1]) {
       args.companyTasksRoot = argv[i + 1];
       i++;
+    } else if (argv[i] === '--plan-handoff') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --plan-handoff.');
+      args.planHandoff = argv[++i];
+    } else if (argv[i] === '--blocked-reporter') {
+      const identity = argv[i + 1];
+      if (!identity) throw new CliArgsError('Missing value for --blocked-reporter.');
+      if (!EMPLOYEE_IDENTITIES.includes(identity as EmployeeIdentity))
+        throw new CliArgsError(`Invalid --blocked-reporter identity ${JSON.stringify(identity)}.`);
+      args.blockedReporter = identity as EmployeeIdentity;
+      i++;
+    } else if (argv[i] === '--blocked-blocker') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --blocked-blocker.');
+      args.blockedBlocker = argv[++i];
+    } else if (argv[i] === '--blocked-resolution') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --blocked-resolution.');
+      args.blockedResolution = argv[++i];
+    } else if (argv[i] === '--blocked-evidence') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --blocked-evidence.');
+      args.blockedEvidence = argv[++i];
+    } else if (argv[i] === '--blocked-resume-state') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --blocked-resume-state.');
+      args.blockedResumeState = argv[++i];
+    } else if (argv[i] === '--alex-authorized-resume') {
+      args.alexAuthorizedResume = true;
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
@@ -92,6 +124,12 @@ Options:
   --host <string>       Host to bind to (default: 127.0.0.1)
   --discover-task <id>  Report the employee's authoritative actionable task
   --company-tasks-root  Root containing the authoritative tasks directories
+  --plan-handoff <state> Plan one explicit transition for the discovered task
+  --blocked-reporter <id> --blocked-blocker <text> --blocked-resolution <text>
+  --blocked-evidence <text> --blocked-resume-state <state>
+                         Required metadata when planning entry to BLOCKED
+  --alex-authorized-resume
+                         Confirm Alex authorized an exact BLOCKED resume
   --help                Show this help message`);
       process.exit(0);
     }
@@ -111,6 +149,24 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  if (args.planHandoff && !args.discoverTask) {
+    console.error('[Pixel Agents] --plan-handoff requires --discover-task.');
+    process.exitCode = 1;
+    return;
+  }
+  const hasPlannerOnlyInput =
+    args.blockedReporter !== undefined ||
+    args.blockedBlocker !== undefined ||
+    args.blockedResolution !== undefined ||
+    args.blockedEvidence !== undefined ||
+    args.blockedResumeState !== undefined ||
+    args.alexAuthorizedResume !== undefined;
+  if (hasPlannerOnlyInput && !args.planHandoff) {
+    console.error('[Pixel Agents] BLOCKED planner inputs require --plan-handoff.');
+    process.exitCode = 1;
+    return;
+  }
+
   if (args.discoverTask) {
     if (!args.companyTasksRoot) {
       console.error('[Pixel Agents] --discover-task requires --company-tasks-root.');
@@ -123,8 +179,42 @@ async function main(): Promise<void> {
       active: path.join(tasksRoot, 'active'),
       review: path.join(tasksRoot, 'review'),
     });
-    console.log(JSON.stringify(result, null, 2));
-    process.exitCode = result.outcome === 'found' || result.outcome === 'none' ? 0 : 1;
+    if (args.planHandoff) {
+      const blockedValues = [
+        args.blockedReporter,
+        args.blockedBlocker,
+        args.blockedResolution,
+        args.blockedEvidence,
+        args.blockedResumeState,
+      ];
+      const hasAnyBlockedValue = blockedValues.some((value) => value !== undefined);
+      const hasAllBlockedValues = blockedValues.every((value) => value !== undefined);
+      const plan = planHandoffTransition({
+        discovery: result,
+        requestedTargetState: args.planHandoff,
+        ...(hasAllBlockedValues
+          ? {
+              blockedEntry: {
+                reporter: args.blockedReporter!,
+                blocker: args.blockedBlocker!,
+                resolution: args.blockedResolution!,
+                evidence: args.blockedEvidence!,
+                resumeState: args.blockedResumeState!,
+              },
+            }
+          : {}),
+        ...(args.alexAuthorizedResume ? { alexAuthorizedResume: true } : {}),
+      });
+      if (hasAnyBlockedValue && !hasAllBlockedValues) {
+        plan.legal = false;
+        plan.reason = 'Blocked-entry CLI metadata is incomplete.';
+      }
+      console.log(JSON.stringify(plan, null, 2));
+      process.exitCode = plan.legal ? 0 : 1;
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+      process.exitCode = result.outcome === 'found' || result.outcome === 'none' ? 0 : 1;
+    }
     return;
   }
 
