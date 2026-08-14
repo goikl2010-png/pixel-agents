@@ -113,6 +113,39 @@ describe('parseArgs', () => {
     expect(() => parseArgs(['--blocked-reporter', 'nova'])).toThrow(CliArgsError);
     expect(() => parseArgs(['--blocked-evidence'])).toThrow(CliArgsError);
   });
+  it('parses guarded handoff execution arguments', () => {
+    expect(
+      parseArgs([
+        '--execute-handoff',
+        '--expected-source-hash',
+        'a'.repeat(64),
+        '--handoff-actor',
+        'Nova',
+        '--handoff-recipient',
+        'Pixel',
+        '--handoff-timestamp',
+        '2026-08-14 14:00 +08:00',
+        '--handoff-evidence',
+        'tests passed',
+        '--handoff-next-action',
+        'run QA',
+      ]),
+    ).toMatchObject({
+      executeHandoff: true,
+      expectedSourceHash: 'a'.repeat(64),
+      handoffActor: 'Nova',
+      handoffRecipient: 'Pixel',
+      handoffTimestamp: '2026-08-14 14:00 +08:00',
+      handoffEvidence: 'tests passed',
+      handoffNextAction: 'run QA',
+    });
+  });
+
+  it('rejects malformed guarded execution identities and missing values', () => {
+    expect(() => parseArgs(['--handoff-actor', 'nova'])).toThrow(CliArgsError);
+    expect(() => parseArgs(['--expected-source-hash'])).toThrow(CliArgsError);
+    expect(() => parseArgs(['--handoff-next-action'])).toThrow(CliArgsError);
+  });
   // 1. No --port -> ephemeral default (unset), never a hardcoded port
   it('defaults port to undefined (ephemeral) when --port is omitted', () => {
     const args = parseArgs([]);
