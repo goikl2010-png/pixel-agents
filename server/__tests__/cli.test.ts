@@ -77,6 +77,42 @@ describe('parseArgs', () => {
   it('rejects a noncanonical discovery identity', () => {
     expect(() => parseArgs(['--discover-task', 'nova'])).toThrow(CliArgsError);
   });
+  it('parses read-only handoff planning arguments', () => {
+    expect(
+      parseArgs([
+        '--discover-task',
+        'Nova',
+        '--company-tasks-root',
+        'C:\\AI-Company',
+        '--plan-handoff',
+        'BLOCKED',
+        '--blocked-reporter',
+        'Nova',
+        '--blocked-blocker',
+        'waiting',
+        '--blocked-resolution',
+        'owner decision',
+        '--blocked-evidence',
+        'issue',
+        '--blocked-resume-state',
+        'DEVELOPMENT',
+      ]),
+    ).toMatchObject({
+      discoverTask: 'Nova',
+      planHandoff: 'BLOCKED',
+      blockedReporter: 'Nova',
+      blockedBlocker: 'waiting',
+      blockedResolution: 'owner decision',
+      blockedEvidence: 'issue',
+      blockedResumeState: 'DEVELOPMENT',
+    });
+  });
+
+  it('rejects missing planner target and noncanonical reporter', () => {
+    expect(() => parseArgs(['--plan-handoff'])).toThrow(CliArgsError);
+    expect(() => parseArgs(['--blocked-reporter', 'nova'])).toThrow(CliArgsError);
+    expect(() => parseArgs(['--blocked-evidence'])).toThrow(CliArgsError);
+  });
   // 1. No --port -> ephemeral default (unset), never a hardcoded port
   it('defaults port to undefined (ephemeral) when --port is omitted', () => {
     const args = parseArgs([]);

@@ -23,12 +23,14 @@ export interface TaskLocations {
   active: string;
   review: string;
 }
+export type TaskStorageClass = keyof TaskLocations;
 export interface ActionableTask {
   taskId: string;
   owner: EmployeeIdentity;
   currentState: string;
   resumeState?: string;
   sourcePath: string;
+  sourceStorage: TaskStorageClass;
 }
 export type TaskDiscoveryResult =
   | { outcome: 'found'; task: ActionableTask }
@@ -47,7 +49,11 @@ function field(markdown: string, name: string): string | undefined | string[] {
   return value === 'None' ? undefined : value;
 }
 
-function parseTask(markdown: string, sourcePath: string): ActionableTask | string {
+function parseTask(
+  markdown: string,
+  sourcePath: string,
+  sourceStorage: TaskStorageClass,
+): ActionableTask | string {
   const taskId = field(markdown, 'Task ID');
   const owner = field(markdown, 'Owner');
   const currentState = field(markdown, 'Current state');
@@ -76,6 +82,7 @@ function parseTask(markdown: string, sourcePath: string): ActionableTask | strin
     currentState,
     ...(resumeState ? { resumeState } : {}),
     sourcePath,
+    sourceStorage,
   };
 }
 
@@ -85,22 +92,25 @@ export async function discoverActionableTask(
 ): Promise<TaskDiscoveryResult> {
   const errors: string[] = [];
   const tasks: ActionableTask[] = [];
-  const files: string[] = [];
-  for (const directory of [locations.backlog, locations.active, locations.review]) {
+  const files: Array<{ sourcePath: string; sourceStorage: TaskStorageClass }> = [];
+  for (const sourceStorage of ['backlog', 'active', 'review'] as const) {
+    const directory = locations[sourceStorage];
     try {
       const entries = await fs.readdir(directory, { withFileTypes: true });
       files.push(
         ...entries
           .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
-          .map((entry) => path.join(directory, entry.name)),
+          .map((entry) => ({ sourcePath: path.join(directory, entry.name), sourceStorage })),
       );
     } catch (error) {
       errors.push(`${directory}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  for (const sourcePath of files.sort((a, b) => a.localeCompare(b))) {
+  for (const { sourcePath, sourceStorage } of files.sort((a, b) =>
+    a.sourcePath.localeCompare(b.sourcePath),
+  )) {
     try {
-      const parsed = parseTask(await fs.readFile(sourcePath, 'utf8'), sourcePath);
+      const parsed = parseTask(await fs.readFile(sourcePath, 'utf8'), sourcePath, sourceStorage);
       if (typeof parsed === 'string') errors.push(parsed);
       else tasks.push(parsed);
     } catch (error) {
