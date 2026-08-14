@@ -268,12 +268,28 @@ export async function executeHandoff(
     }
     afterHash = hash(updated);
     await fileSystem.writeFile(temporaryPath, updated, { encoding: 'utf8', flag: 'wx' });
+    if (destinationPath !== sourcePath && (await exists(sourcePath, fileSystem))) {
+      failureReason = 'Authoritative source was recreated after claim before installation';
+      throw new Error('post-claim source contention');
+    }
     // link() is an atomic create-if-absent claim for the destination. Unlike
     // rename(), it cannot overwrite a path created after the collision precheck.
     await fileSystem.link(temporaryPath, destinationPath);
     destinationInstalled = true;
+    if (destinationPath !== sourcePath && (await exists(sourcePath, fileSystem))) {
+      failureReason = 'Authoritative source was recreated after destination installation';
+      throw new Error('post-claim source contention');
+    }
     await fileSystem.unlink(temporaryPath);
+    if (destinationPath !== sourcePath && (await exists(sourcePath, fileSystem))) {
+      failureReason = 'Authoritative source was recreated during transaction cleanup';
+      throw new Error('post-claim source contention');
+    }
     await fileSystem.unlink(backupPath);
+    if (destinationPath !== sourcePath && (await exists(sourcePath, fileSystem))) {
+      failureReason = 'Authoritative source was recreated before transaction completion';
+      throw new Error('post-claim source contention');
+    }
     return {
       taskId: task.taskId,
       sourceState: freshPlan.sourceState,
@@ -289,11 +305,18 @@ export async function executeHandoff(
     };
   } catch (error) {
     try {
-      if (destinationInstalled) await retryOnce(() => fileSystem.unlink(destinationPath));
+      const currentSourceExists = sourceBackedUp ? await exists(sourcePath, fileSystem) : false;
+      const backupExists = sourceBackedUp ? await exists(backupPath, fileSystem) : false;
+      // Before backup disposal we can roll back the installed destination and
+      // restore the claim. After disposal, retain the destination unless a
+      // recreated source exists; this guarantees at least one authoritative
+      // record survives every caught cleanup/check failure.
+      if (destinationInstalled && (backupExists || currentSourceExists))
+        await retryOnce(() => fileSystem.unlink(destinationPath));
       if (await exists(temporaryPath, fileSystem))
         await retryOnce(() => fileSystem.unlink(temporaryPath));
-      if (sourceBackedUp) {
-        if (await exists(sourcePath, fileSystem)) {
+      if (backupExists) {
+        if (currentSourceExists) {
           // A contender created a new authoritative source after our claim.
           // Preserve it and discard only our now-stale claimed backup.
           await retryOnce(() => fileSystem.unlink(backupPath));

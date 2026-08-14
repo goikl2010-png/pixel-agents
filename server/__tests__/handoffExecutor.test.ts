@@ -381,3 +381,133 @@ it('retries a transient rollback rename failure without losing the authoritative
     (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
   ).toEqual([]);
 });
+
+it('rejects source recreation after claim and before destination installation', async () => {
+  const { input, locations, sourcePath } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const destinationPath = path.join(locations.review, 'task.md');
+  const contender = 'post-claim source contender';
+  const native = await import('fs/promises');
+  const injected: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: async (file, content, options) => {
+      await native.writeFile(file, content, options);
+      if (file.endsWith('.new')) await native.writeFile(sourcePath, contender);
+    },
+    rename: (from, to) => native.rename(from, to),
+    link: (from, to) => native.link(from, to),
+    unlink: (file) => native.unlink(file),
+    stat: (file) => native.stat(file),
+  };
+  expect((await executeHandoff(input, injected)).reason).toContain('source was recreated');
+  expect(await readFile(sourcePath, 'utf8')).toBe(contender);
+  await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
+
+it('rolls back its installed destination when the source is recreated after installation', async () => {
+  const { input, locations, sourcePath } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const destinationPath = path.join(locations.review, 'task.md');
+  const contender = 'post-install source contender';
+  const native = await import('fs/promises');
+  const injected: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: (file, content, options) => native.writeFile(file, content, options),
+    rename: (from, to) => native.rename(from, to),
+    link: async (from, to) => {
+      await native.link(from, to);
+      await native.writeFile(sourcePath, contender);
+    },
+    unlink: (file) => native.unlink(file),
+    stat: (file) => native.stat(file),
+  };
+  expect((await executeHandoff(input, injected)).reason).toContain('source was recreated');
+  expect(await readFile(sourcePath, 'utf8')).toBe(contender);
+  await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
+
+it('preserves post-install source contention through a transient rollback cleanup failure', async () => {
+  const { input, locations, sourcePath } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const destinationPath = path.join(locations.review, 'task.md');
+  const contender = 'source contender during transient cleanup failure';
+  const native = await import('fs/promises');
+  let destinationUnlinkFailures = 0;
+  const injected: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: (file, content, options) => native.writeFile(file, content, options),
+    rename: (from, to) => native.rename(from, to),
+    link: async (from, to) => {
+      await native.link(from, to);
+      await native.writeFile(sourcePath, contender);
+    },
+    unlink: async (file) => {
+      if (file === destinationPath && destinationUnlinkFailures++ === 0)
+        throw new Error('transient destination cleanup failure');
+      await native.unlink(file);
+    },
+    stat: (file) => native.stat(file),
+  };
+  expect((await executeHandoff(input, injected)).success).toBe(false);
+  expect(await readFile(sourcePath, 'utf8')).toBe(contender);
+  await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
+
+it('preserves combined source and destination contenders while removing transaction artifacts', async () => {
+  const { input, locations, sourcePath } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const destinationPath = path.join(locations.review, 'task.md');
+  const native = await import('fs/promises');
+  const injected: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: async (file, content, options) => {
+      await native.writeFile(file, content, options);
+      if (file.endsWith('.new')) {
+        await native.writeFile(sourcePath, 'combined source contender');
+        await native.writeFile(destinationPath, 'combined destination contender');
+      }
+    },
+    rename: (from, to) => native.rename(from, to),
+    link: (from, to) => native.link(from, to),
+    unlink: (file) => native.unlink(file),
+    stat: (file) => native.stat(file),
+  };
+  expect((await executeHandoff(input, injected)).success).toBe(false);
+  expect(await readFile(sourcePath, 'utf8')).toBe('combined source contender');
+  expect(await readFile(destinationPath, 'utf8')).toBe('combined destination contender');
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
+
+it('retains the installed destination when backup cleanup reports failure after deletion', async () => {
+  const { input, locations, sourcePath } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const destinationPath = path.join(locations.review, 'task.md');
+  const native = await import('fs/promises');
+  let injected = false;
+  const fileSystem: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: (file, content, options) => native.writeFile(file, content, options),
+    rename: (from, to) => native.rename(from, to),
+    link: (from, to) => native.link(from, to),
+    unlink: async (file) => {
+      await native.unlink(file);
+      if (file.endsWith('.old') && !injected) {
+        injected = true;
+        throw new Error('cleanup failed after backup deletion');
+      }
+    },
+    stat: (file) => native.stat(file),
+  };
+  expect((await executeHandoff(input, fileSystem)).success).toBe(false);
+  await expect(stat(sourcePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await readFile(destinationPath, 'utf8')).toContain('**Current state:** READY_FOR_QA');
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
