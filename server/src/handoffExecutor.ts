@@ -48,6 +48,7 @@ export interface HandoffFileSystem {
     options: { encoding: BufferEncoding; flag: 'wx' },
   ): Promise<void>;
   rename(source: string, destination: string): Promise<void>;
+  link(existingPath: string, newPath: string): Promise<void>;
   unlink(file: string): Promise<void>;
   stat(file: string): Promise<unknown>;
 }
@@ -56,6 +57,7 @@ const defaultFileSystem: HandoffFileSystem = {
   readFile: (file, encoding) => fs.readFile(file, encoding),
   writeFile: (file, content, options) => fs.writeFile(file, content, options),
   rename: (source, destination) => fs.rename(source, destination),
+  link: (existingPath, newPath) => fs.link(existingPath, newPath),
   unlink: (file) => fs.unlink(file),
   stat: (file) => fs.stat(file),
 };
@@ -97,6 +99,14 @@ async function exists(file: string, fileSystem: HandoffFileSystem): Promise<bool
   } catch (error) {
     if (isMissing(error)) return false;
     throw error;
+  }
+}
+
+async function retryOnce(operation: () => Promise<void>): Promise<void> {
+  try {
+    await operation();
+  } catch {
+    await operation();
   }
 }
 
@@ -230,48 +240,39 @@ export async function executeHandoff(
       destinationPath,
     );
 
-  let original: string;
-  try {
-    original = await fileSystem.readFile(sourcePath, 'utf8');
-  } catch (error) {
-    return failure(
-      input,
-      `Unable to read authoritative source: ${String(error)}`,
-      null,
-      destinationPath,
-    );
-  }
-  const beforeHash = hash(original);
-  if (beforeHash !== input.expectedSourceHash)
-    return failure(
-      input,
-      'Authoritative source content hash changed before execution.',
-      beforeHash,
-      destinationPath,
-    );
-  let updated: string;
-  try {
-    updated = updateRecord(original, freshPlan, handoff);
-  } catch (error) {
-    return failure(
-      input,
-      `Authoritative record cannot be updated: ${String(error)}`,
-      beforeHash,
-      destinationPath,
-    );
-  }
-  const afterHash = hash(updated);
   const nonce = randomUUID();
   const temporaryPath = path.join(sourceDirectory, `.${path.basename(sourcePath)}.${nonce}.new`);
   const backupPath = path.join(sourceDirectory, `.${path.basename(sourcePath)}.${nonce}.old`);
   let sourceBackedUp = false;
   let destinationInstalled = false;
+  let beforeHash: string | null = null;
+  let afterHash: string | null = null;
+  let failureReason = 'Atomic handoff failed';
   try {
-    await fileSystem.writeFile(temporaryPath, updated, { encoding: 'utf8', flag: 'wx' });
+    // The rename is the atomic claim boundary. Every subsequent hash and derived
+    // byte comes from this exact claimed file object, closing the read/rename race.
     await fileSystem.rename(sourcePath, backupPath);
     sourceBackedUp = true;
-    await fileSystem.rename(temporaryPath, destinationPath);
+    const original = await fileSystem.readFile(backupPath, 'utf8');
+    beforeHash = hash(original);
+    if (beforeHash !== input.expectedSourceHash) {
+      failureReason = 'Claimed authoritative source content does not match the expected hash';
+      throw new Error('stale claimed source');
+    }
+    let updated: string;
+    try {
+      updated = updateRecord(original, freshPlan, handoff);
+    } catch (error) {
+      failureReason = 'Claimed authoritative record cannot be updated';
+      throw error;
+    }
+    afterHash = hash(updated);
+    await fileSystem.writeFile(temporaryPath, updated, { encoding: 'utf8', flag: 'wx' });
+    // link() is an atomic create-if-absent claim for the destination. Unlike
+    // rename(), it cannot overwrite a path created after the collision precheck.
+    await fileSystem.link(temporaryPath, destinationPath);
     destinationInstalled = true;
+    await fileSystem.unlink(temporaryPath);
     await fileSystem.unlink(backupPath);
     return {
       taskId: task.taskId,
@@ -288,20 +289,29 @@ export async function executeHandoff(
     };
   } catch (error) {
     try {
-      if (destinationInstalled) await fileSystem.unlink(destinationPath);
-      if (sourceBackedUp) await fileSystem.rename(backupPath, sourcePath);
-      if (await exists(temporaryPath, fileSystem)) await fileSystem.unlink(temporaryPath);
+      if (destinationInstalled) await retryOnce(() => fileSystem.unlink(destinationPath));
+      if (await exists(temporaryPath, fileSystem))
+        await retryOnce(() => fileSystem.unlink(temporaryPath));
+      if (sourceBackedUp) {
+        if (await exists(sourcePath, fileSystem)) {
+          // A contender created a new authoritative source after our claim.
+          // Preserve it and discard only our now-stale claimed backup.
+          await retryOnce(() => fileSystem.unlink(backupPath));
+        } else {
+          await retryOnce(() => fileSystem.rename(backupPath, sourcePath));
+        }
+      }
     } catch (rollbackError) {
       return failure(
         input,
-        `Atomic handoff failed and rollback failed: ${String(error)}; ${String(rollbackError)}`,
+        `${failureReason} and rollback failed: ${String(error)}; ${String(rollbackError)}`,
         beforeHash,
         destinationPath,
       );
     }
     return failure(
       input,
-      `Atomic handoff failed; original restored: ${String(error)}`,
+      `${failureReason}; authoritative content preserved: ${String(error)}`,
       beforeHash,
       destinationPath,
     );

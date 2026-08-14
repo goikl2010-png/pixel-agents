@@ -278,7 +278,6 @@ it.each(['write', 'move'] as const)(
   'restores the original and cleans artifacts on injected %s failure',
   async (failurePoint) => {
     const { input, sourcePath, original } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
-    let renameCalls = 0;
     const native = await import('fs/promises');
     const injected: HandoffFileSystem = {
       readFile: (file, encoding) => native.readFile(file, encoding),
@@ -286,10 +285,10 @@ it.each(['write', 'move'] as const)(
         if (failurePoint === 'write') throw new Error('injected write failure');
         await native.writeFile(file, content, options);
       },
-      rename: async (from, to) => {
-        renameCalls++;
-        if (failurePoint === 'move' && renameCalls === 2) throw new Error('injected move failure');
-        await native.rename(from, to);
+      rename: (from, to) => native.rename(from, to),
+      link: async (from, to) => {
+        if (failurePoint === 'move') throw new Error('injected move failure');
+        await native.link(from, to);
       },
       unlink: (file) => native.unlink(file),
       stat: (file) => native.stat(file),
@@ -301,3 +300,84 @@ it.each(['write', 'move'] as const)(
     ).toEqual([]);
   },
 );
+
+it('preserves a concurrent edit injected immediately before the atomic source claim', async () => {
+  const { input, locations, sourcePath } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const concurrent = record('DEVELOPMENT').replace(
+    'Keep this byte-identical outside required fields.',
+    'Concurrent authoritative edit.',
+  );
+  const native = await import('fs/promises');
+  let claimed = false;
+  const injected: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: (file, content, options) => native.writeFile(file, content, options),
+    rename: async (from, to) => {
+      if (!claimed && from === sourcePath) {
+        claimed = true;
+        await native.writeFile(sourcePath, concurrent);
+      }
+      await native.rename(from, to);
+    },
+    link: (from, to) => native.link(from, to),
+    unlink: (file) => native.unlink(file),
+    stat: (file) => native.stat(file),
+  };
+  const result = await executeHandoff(input, injected);
+  expect(result).toMatchObject({ success: false, beforeHash: digest(concurrent) });
+  expect(await readFile(sourcePath, 'utf8')).toBe(concurrent);
+  await expect(stat(path.join(locations.review, 'task.md'))).rejects.toMatchObject({
+    code: 'ENOENT',
+  });
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
+
+it('preserves post-check destination contention without overwriting either record', async () => {
+  const { input, locations, sourcePath, original } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const destinationPath = path.join(locations.review, 'task.md');
+  const native = await import('fs/promises');
+  const injected: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: (file, content, options) => native.writeFile(file, content, options),
+    rename: (from, to) => native.rename(from, to),
+    link: async (from, to) => {
+      await native.writeFile(to, 'concurrent destination');
+      await native.link(from, to);
+    },
+    unlink: (file) => native.unlink(file),
+    stat: (file) => native.stat(file),
+  };
+  expect((await executeHandoff(input, injected)).success).toBe(false);
+  expect(await readFile(sourcePath, 'utf8')).toBe(original);
+  expect(await readFile(destinationPath, 'utf8')).toBe('concurrent destination');
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
+
+it('retries a transient rollback rename failure without losing the authoritative record', async () => {
+  const { input, sourcePath, original } = await fixture('DEVELOPMENT', 'READY_FOR_QA');
+  const native = await import('fs/promises');
+  let rollbackFailures = 0;
+  const injected: HandoffFileSystem = {
+    readFile: (file, encoding) => native.readFile(file, encoding),
+    writeFile: (file, content, options) => native.writeFile(file, content, options),
+    rename: async (from, to) => {
+      if (to === sourcePath && rollbackFailures++ === 0)
+        throw new Error('transient rollback failure');
+      await native.rename(from, to);
+    },
+    link: async () => {
+      throw new Error('force rollback');
+    },
+    unlink: (file) => native.unlink(file),
+    stat: (file) => native.stat(file),
+  };
+  expect((await executeHandoff(input, injected)).success).toBe(false);
+  expect(await readFile(sourcePath, 'utf8')).toBe(original);
+  expect(
+    (await readdir(path.dirname(sourcePath))).filter((name) => name.startsWith('.task.md')),
+  ).toEqual([]);
+});
