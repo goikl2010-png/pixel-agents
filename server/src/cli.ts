@@ -29,6 +29,7 @@ import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
 import { executeHandoff } from './handoffExecutor.js';
 import { planHandoffTransition } from './handoffTransitionPlanner.js';
+import { selectNextHandoff } from './nextHandoffSelector.js';
 import {
   claudeProvider,
   codexProvider,
@@ -47,6 +48,7 @@ export interface CliArgs {
   discoverTask?: EmployeeIdentity;
   companyTasksRoot?: string;
   planHandoff?: string;
+  selectNextHandoff?: boolean;
   blockedReporter?: EmployeeIdentity;
   blockedBlocker?: string;
   blockedResolution?: string;
@@ -103,6 +105,8 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (argv[i] === '--plan-handoff') {
       if (!argv[i + 1]) throw new CliArgsError('Missing value for --plan-handoff.');
       args.planHandoff = argv[++i];
+    } else if (argv[i] === '--select-next-handoff') {
+      args.selectNextHandoff = true;
     } else if (argv[i] === '--blocked-reporter') {
       const identity = argv[i + 1];
       if (!identity) throw new CliArgsError('Missing value for --blocked-reporter.');
@@ -156,6 +160,7 @@ Options:
   --discover-task <id>  Report the employee's authoritative actionable task
   --company-tasks-root  Root containing the authoritative tasks directories
   --plan-handoff <state> Plan one explicit transition for the discovered task
+  --select-next-handoff Select one uniquely safe next transition (read-only)
   --blocked-reporter <id> --blocked-blocker <text> --blocked-resolution <text>
   --blocked-evidence <text> --blocked-resume-state <state>
                          Required metadata when planning entry to BLOCKED
@@ -187,6 +192,16 @@ async function main(): Promise<void> {
 
   if (args.planHandoff && !args.discoverTask) {
     console.error('[Pixel Agents] --plan-handoff requires --discover-task.');
+    process.exitCode = 1;
+    return;
+  }
+  if (args.selectNextHandoff && !args.discoverTask) {
+    console.error('[Pixel Agents] --select-next-handoff requires --discover-task.');
+    process.exitCode = 1;
+    return;
+  }
+  if (args.selectNextHandoff && args.planHandoff) {
+    console.error('[Pixel Agents] --select-next-handoff cannot be combined with --plan-handoff.');
     process.exitCode = 1;
     return;
   }
@@ -233,7 +248,11 @@ async function main(): Promise<void> {
       review: path.join(tasksRoot, 'review'),
     };
     const result = await discoverActionableTask(args.discoverTask, locations);
-    if (args.planHandoff) {
+    if (args.selectNextHandoff) {
+      const selection = selectNextHandoff(result);
+      console.log(JSON.stringify(selection, null, 2));
+      process.exitCode = selection.selected ? 0 : 1;
+    } else if (args.planHandoff) {
       const blockedValues = [
         args.blockedReporter,
         args.blockedBlocker,
