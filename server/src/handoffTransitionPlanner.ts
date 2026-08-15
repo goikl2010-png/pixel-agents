@@ -77,7 +77,7 @@ export interface TransitionPlan {
   destinationStorage: AuthoritativeStorageClass | null;
 }
 
-function storageFor(state: LifecycleState): AuthoritativeStorageClass | null {
+export function storageForLifecycleState(state: LifecycleState): AuthoritativeStorageClass | null {
   if (state === 'BACKLOG') return 'backlog';
   if (state === 'DEVELOPMENT' || state === 'CHANGES_REQUIRED') return 'active';
   if (state === 'COMPLETED') return 'completed';
@@ -100,7 +100,9 @@ function baseIllegal(requestedTargetState: string, reason: string): TransitionPl
     targetOwner: isState(requestedTargetState) ? STATE_OWNER[requestedTargetState] : null,
     legal: false,
     reason,
-    destinationStorage: isState(requestedTargetState) ? storageFor(requestedTargetState) : null,
+    destinationStorage: isState(requestedTargetState)
+      ? storageForLifecycleState(requestedTargetState)
+      : null,
   };
 }
 
@@ -148,7 +150,9 @@ export function planHandoffTransition(input: TransitionPlanInput): TransitionPla
 
   const targetOwner = STATE_OWNER[requestedTargetState];
   const destinationStorage =
-    requestedTargetState === 'BLOCKED' ? task.sourceStorage : storageFor(requestedTargetState);
+    requestedTargetState === 'BLOCKED'
+      ? task.sourceStorage
+      : storageForLifecycleState(requestedTargetState);
 
   if (task.currentState === 'COMPLETED')
     return illegal(

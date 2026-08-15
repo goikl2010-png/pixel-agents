@@ -2,6 +2,8 @@
 
 The selector consumes exactly one actionable-task discovery result and reports a next transition only when TASK-009 authorizes that source state and TASK-007's canonical planner confirms exactly one safe legal non-`BLOCKED`, nonterminal successor.
 
+Before considering successors, it reuses TASK-007's canonical lifecycle storage resolver and refuses recognized-but-wrong state/storage pairs as `INVALID_FOUND_TASK`. It does not infer storage from directory names: TASK-006 supports configurable task roots, and its discovery result already supplies the authoritative storage class without carrying the location map needed for safe path validation.
+
 ```text
 pixel-agents --discover-task Nova --company-tasks-root C:\AI-Company --select-next-handoff
 ```

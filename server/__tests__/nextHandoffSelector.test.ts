@@ -17,6 +17,19 @@ const owners = {
   COMPLETED: 'Alex',
   BLOCKED: 'Alex',
 } as const;
+const canonicalStorage = {
+  BACKLOG: 'backlog',
+  DEVELOPMENT: 'active',
+  READY_FOR_QA: 'review',
+  QA: 'review',
+  CHANGES_REQUIRED: 'active',
+  QA_RETEST: 'review',
+  READY_FOR_REVIEW: 'review',
+  REVIEW: 'review',
+  APPROVED: 'review',
+  COMPLETED: 'completed',
+  BLOCKED: null,
+} as const;
 
 function found(
   state: LifecycleState,
@@ -30,7 +43,9 @@ function found(
       currentState: state,
       sourcePath: 'C:\\AI-Company\\tasks\\active\\task.md',
       sourceStorage:
-        state === 'BACKLOG' ? 'backlog' : state === 'DEVELOPMENT' ? 'active' : 'review',
+        canonicalStorage[state] === 'completed' || canonicalStorage[state] === null
+          ? 'review'
+          : canonicalStorage[state],
       ...(state === 'BLOCKED' ? { resumeState: 'QA' } : {}),
       ...overrides,
     },
@@ -48,8 +63,7 @@ it.each([
     expect(selectNextHandoff(found(sourceState))).toEqual({
       taskId: 'TASK-009',
       sourcePath: 'C:\\AI-Company\\tasks\\active\\task.md',
-      sourceStorage:
-        sourceState === 'BACKLOG' ? 'backlog' : sourceState === 'DEVELOPMENT' ? 'active' : 'review',
+      sourceStorage: canonicalStorage[sourceState],
       sourceState,
       sourceOwner: owners[sourceState],
       selected: true,
@@ -77,10 +91,49 @@ it.each(['READY_FOR_QA', 'QA', 'QA_RETEST', 'REVIEW'] as const)(
 it.each([
   ['APPROVED', NEXT_HANDOFF_REASON.alexAuthority],
   ['BLOCKED', NEXT_HANDOFF_REASON.alexAuthority],
-  ['COMPLETED', NEXT_HANDOFF_REASON.terminal],
 ] as const)('refuses protected state %s', (state, reasonCode) => {
   expect(selectNextHandoff(found(state))).toMatchObject({ selected: false, reasonCode });
 });
+
+it('returns terminal refusal for a canonical completed source supplied at the runtime boundary', () => {
+  expect(
+    selectNextHandoff(
+      found('COMPLETED', { sourceStorage: 'completed' as ActionableTask['sourceStorage'] }),
+    ),
+  ).toMatchObject({
+    selected: false,
+    targetState: null,
+    reasonCode: NEXT_HANDOFF_REASON.terminal,
+  });
+});
+
+it.each(
+  LIFECYCLE_STATES.flatMap((state) => {
+    const expected = canonicalStorage[state];
+    if (expected === null) return [];
+    return (['backlog', 'active', 'review'] as const)
+      .filter((sourceStorage) => sourceStorage !== expected)
+      .map((sourceStorage) => [state, sourceStorage, expected] as const);
+  }),
+)(
+  'fails closed for canonical state/storage mismatch %s in %s (expected %s)',
+  (state, sourceStorage) => {
+    const discovery = found(state, { sourceStorage });
+    const before = JSON.stringify(discovery);
+    const first = selectNextHandoff(discovery);
+    expect(first).toMatchObject({
+      selected: false,
+      sourceState: state,
+      sourceStorage,
+      targetState: null,
+      targetOwner: null,
+      destinationStorage: null,
+      reasonCode: NEXT_HANDOFF_REASON.invalidFoundTask,
+    });
+    expect(JSON.stringify(selectNextHandoff(discovery))).toBe(JSON.stringify(first));
+    expect(JSON.stringify(discovery)).toBe(before);
+  },
+);
 
 it.each<TaskDiscoveryResult>([
   { outcome: 'none', employee: 'Nova' },

@@ -3,6 +3,7 @@ import {
   type AuthoritativeStorageClass,
   LIFECYCLE_STATES,
   planHandoffTransition,
+  storageForLifecycleState,
 } from './handoffTransitionPlanner.js';
 
 export const NEXT_HANDOFF_REASON = {
@@ -76,6 +77,22 @@ export function selectNextHandoff(discovery: TaskDiscoveryResult): NextHandoffSe
     sourceOwner: task.owner,
   };
 
+  const sourceState = LIFECYCLE_STATES.find((state) => state === task.currentState);
+  const canonicalSourceStorage = sourceState ? storageForLifecycleState(sourceState) : undefined;
+  if (
+    canonicalSourceStorage === undefined ||
+    (canonicalSourceStorage !== null && canonicalSourceStorage !== task.sourceStorage)
+  )
+    return refusal(
+      NEXT_HANDOFF_REASON.invalidFoundTask,
+      canonicalSourceStorage === undefined
+        ? `Unsupported source state ${JSON.stringify(task.currentState)}.`
+        : `Source state ${task.currentState} requires authoritative storage ${canonicalSourceStorage}, not ${task.sourceStorage}.`,
+      source,
+    );
+  if (task.currentState === 'COMPLETED')
+    return refusal(NEXT_HANDOFF_REASON.terminal, 'COMPLETED is terminal.', source);
+
   // Ask the canonical TASK-007 planner about every possible target. This keeps
   // lifecycle legality, ownership, and destination storage in one model.
   const safePlans = LIFECYCLE_STATES.filter(
@@ -101,8 +118,6 @@ export function selectNextHandoff(discovery: TaskDiscoveryResult): NextHandoffSe
       return refusal(NEXT_HANDOFF_REASON.invalidFoundTask, validation.reason, source);
   }
 
-  if (task.currentState === 'COMPLETED')
-    return refusal(NEXT_HANDOFF_REASON.terminal, 'COMPLETED is terminal.', source);
   if (task.currentState === 'APPROVED' || task.currentState === 'BLOCKED')
     return refusal(
       NEXT_HANDOFF_REASON.alexAuthority,
