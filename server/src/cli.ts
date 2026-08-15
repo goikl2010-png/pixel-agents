@@ -27,6 +27,7 @@ import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
+import { executeHandoff } from './handoffExecutor.js';
 import { planHandoffTransition } from './handoffTransitionPlanner.js';
 import {
   claudeProvider,
@@ -52,6 +53,13 @@ export interface CliArgs {
   blockedEvidence?: string;
   blockedResumeState?: string;
   alexAuthorizedResume?: boolean;
+  executeHandoff?: boolean;
+  expectedSourceHash?: string;
+  handoffActor?: EmployeeIdentity;
+  handoffRecipient?: EmployeeIdentity;
+  handoffTimestamp?: string;
+  handoffEvidence?: string;
+  handoffNextAction?: string;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -116,6 +124,29 @@ export function parseArgs(argv: string[]): CliArgs {
       args.blockedResumeState = argv[++i];
     } else if (argv[i] === '--alex-authorized-resume') {
       args.alexAuthorizedResume = true;
+    } else if (argv[i] === '--execute-handoff') {
+      args.executeHandoff = true;
+    } else if (argv[i] === '--expected-source-hash') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --expected-source-hash.');
+      args.expectedSourceHash = argv[++i];
+    } else if (argv[i] === '--handoff-actor' || argv[i] === '--handoff-recipient') {
+      const option = argv[i];
+      const identity = argv[i + 1];
+      if (!identity) throw new CliArgsError(`Missing value for ${option}.`);
+      if (!EMPLOYEE_IDENTITIES.includes(identity as EmployeeIdentity))
+        throw new CliArgsError(`Invalid ${option} identity ${JSON.stringify(identity)}.`);
+      if (option === '--handoff-actor') args.handoffActor = identity as EmployeeIdentity;
+      else args.handoffRecipient = identity as EmployeeIdentity;
+      i++;
+    } else if (argv[i] === '--handoff-timestamp') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --handoff-timestamp.');
+      args.handoffTimestamp = argv[++i];
+    } else if (argv[i] === '--handoff-evidence') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --handoff-evidence.');
+      args.handoffEvidence = argv[++i];
+    } else if (argv[i] === '--handoff-next-action') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --handoff-next-action.');
+      args.handoffNextAction = argv[++i];
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
@@ -130,6 +161,11 @@ Options:
                          Required metadata when planning entry to BLOCKED
   --alex-authorized-resume
                          Confirm Alex authorized an exact BLOCKED resume
+  --execute-handoff      Execute the legal nonterminal plan exactly once
+  --expected-source-hash <sha256>
+  --handoff-actor <id> --handoff-recipient <id> --handoff-timestamp <text>
+  --handoff-evidence <text> --handoff-next-action <text>
+                         Required caller-supplied guarded execution inputs
   --help                Show this help message`);
       process.exit(0);
     }
@@ -154,6 +190,11 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  if (args.executeHandoff && !args.planHandoff) {
+    console.error('[Pixel Agents] --execute-handoff requires --plan-handoff.');
+    process.exitCode = 1;
+    return;
+  }
   const hasPlannerOnlyInput =
     args.blockedReporter !== undefined ||
     args.blockedBlocker !== undefined ||
@@ -166,6 +207,18 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const hasExecutionOnlyInput =
+    args.expectedSourceHash !== undefined ||
+    args.handoffActor !== undefined ||
+    args.handoffRecipient !== undefined ||
+    args.handoffTimestamp !== undefined ||
+    args.handoffEvidence !== undefined ||
+    args.handoffNextAction !== undefined;
+  if (hasExecutionOnlyInput && !args.executeHandoff) {
+    console.error('[Pixel Agents] guarded execution inputs require --execute-handoff.');
+    process.exitCode = 1;
+    return;
+  }
 
   if (args.discoverTask) {
     if (!args.companyTasksRoot) {
@@ -174,11 +227,12 @@ async function main(): Promise<void> {
       return;
     }
     const tasksRoot = path.resolve(args.companyTasksRoot, 'tasks');
-    const result = await discoverActionableTask(args.discoverTask, {
+    const locations = {
       backlog: path.join(tasksRoot, 'backlog'),
       active: path.join(tasksRoot, 'active'),
       review: path.join(tasksRoot, 'review'),
-    });
+    };
+    const result = await discoverActionableTask(args.discoverTask, locations);
     if (args.planHandoff) {
       const blockedValues = [
         args.blockedReporter,
@@ -209,8 +263,57 @@ async function main(): Promise<void> {
         plan.legal = false;
         plan.reason = 'Blocked-entry CLI metadata is incomplete.';
       }
-      console.log(JSON.stringify(plan, null, 2));
-      process.exitCode = plan.legal ? 0 : 1;
+      if (args.executeHandoff) {
+        const executionValues = [
+          args.expectedSourceHash,
+          args.handoffActor,
+          args.handoffRecipient,
+          args.handoffTimestamp,
+          args.handoffEvidence,
+          args.handoffNextAction,
+        ];
+        if (executionValues.some((value) => value === undefined)) {
+          console.log(
+            JSON.stringify(
+              {
+                taskId: result.outcome === 'found' ? result.task.taskId : null,
+                sourceState: plan.sourceState,
+                targetState: plan.requestedTargetState,
+                sourceOwner: plan.sourceOwner,
+                targetOwner: plan.targetOwner,
+                sourcePath: plan.sourcePath,
+                destinationPath: null,
+                beforeHash: null,
+                afterHash: null,
+                success: false,
+                reason: 'Guarded execution inputs are incomplete.',
+              },
+              null,
+              2,
+            ),
+          );
+          process.exitCode = 1;
+        } else {
+          const execution = await executeHandoff({
+            discovery: result,
+            plan,
+            locations,
+            expectedSourceHash: args.expectedSourceHash!,
+            handoff: {
+              actor: args.handoffActor!,
+              recipient: args.handoffRecipient!,
+              timestamp: args.handoffTimestamp!,
+              evidence: args.handoffEvidence!,
+              nextAction: args.handoffNextAction!,
+            },
+          });
+          console.log(JSON.stringify(execution, null, 2));
+          process.exitCode = execution.success ? 0 : 1;
+        }
+      } else {
+        console.log(JSON.stringify(plan, null, 2));
+        process.exitCode = plan.legal ? 0 : 1;
+      }
     } else {
       console.log(JSON.stringify(result, null, 2));
       process.exitCode = result.outcome === 'found' || result.outcome === 'none' ? 0 : 1;
