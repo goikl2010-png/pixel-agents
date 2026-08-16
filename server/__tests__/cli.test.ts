@@ -77,6 +77,17 @@ describe('parseArgs', () => {
   it('rejects a noncanonical discovery identity', () => {
     expect(() => parseArgs(['--discover-task', 'nova'])).toThrow(CliArgsError);
   });
+  it('parses read-only next-handoff selection arguments', () => {
+    expect(
+      parseArgs([
+        '--discover-task',
+        'Nova',
+        '--company-tasks-root',
+        'C:\\AI-Company',
+        '--select-next-handoff',
+      ]),
+    ).toMatchObject({ discoverTask: 'Nova', selectNextHandoff: true });
+  });
   it('parses read-only handoff planning arguments', () => {
     expect(
       parseArgs([
@@ -236,6 +247,48 @@ describe('dist/cli.js entry-point guard', () => {
     const { code, stderr } = await runCli(['--port', 'not-a-number']);
     expect(code).toBe(1);
     expect(stderr).toContain('Invalid --port');
+  });
+
+  it('selects a deterministic next handoff without mutating the task record', async () => {
+    skipIfNotBuilt();
+    if (!fs.existsSync(CLI_BUNDLE)) return;
+    const companyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-company-'));
+    const taskDirs = ['backlog', 'active', 'review'].map((name) =>
+      path.join(companyRoot, 'tasks', name),
+    );
+    taskDirs.forEach((directory) => fs.mkdirSync(directory, { recursive: true }));
+    const taskPath = path.join(taskDirs[1], 'task.md');
+    const task =
+      '# TASK-009\n\n- **Task ID:** TASK-009\n- **Owner:** Nova\n- **Current state:** DEVELOPMENT\n- **Resume state (required only when BLOCKED):** None\n';
+    fs.writeFileSync(taskPath, task);
+    try {
+      const first = await runCli([
+        '--discover-task',
+        'Nova',
+        '--company-tasks-root',
+        companyRoot,
+        '--select-next-handoff',
+      ]);
+      const second = await runCli([
+        '--discover-task',
+        'Nova',
+        '--company-tasks-root',
+        companyRoot,
+        '--select-next-handoff',
+      ]);
+      expect(first.code).toBe(0);
+      expect(second.stdout).toBe(first.stdout);
+      expect(JSON.parse(first.stdout)).toMatchObject({
+        selected: true,
+        targetState: 'READY_FOR_QA',
+        targetOwner: 'Pixel',
+        destinationStorage: 'review',
+        reasonCode: 'UNIQUE_SAFE_SUCCESSOR',
+      });
+      expect(fs.readFileSync(taskPath, 'utf8')).toBe(task);
+    } finally {
+      fs.rmSync(companyRoot, { recursive: true, force: true });
+    }
   });
 
   it('installs the bundled hook script from the package root on startup', async () => {
