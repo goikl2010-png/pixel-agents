@@ -318,7 +318,7 @@ describe('HookEventHandler', () => {
       session_id: 'expired-sess',
     });
 
-    // Wait well past HOOK_EVENT_BUFFER_MS (5000) + prune interval cycle
+    // Wait well past HOOK_EVENT_BUFFER_MS (5000) + prune interval cycle.
     await new Promise((r) => setTimeout(r, 7000));
 
     // Now register -- event should have been pruned
@@ -330,7 +330,7 @@ describe('HookEventHandler', () => {
     expect(mockWebview.messages).toHaveLength(0);
 
     handler.dispose();
-  });
+  }, 8000);
 
   // ── Auto-discovery ──────────────────────────────────────────
 
