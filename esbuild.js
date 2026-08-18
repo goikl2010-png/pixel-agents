@@ -58,15 +58,24 @@ function buildHooks() {
     'codex',
     'codex-hook.ts',
   );
-  const entries = [claudeEntry, codexEntry].filter((entry) => fs.existsSync(entry));
-  if (entries.length === 0) return;
+  const entries = Object.fromEntries(
+    [
+      ['claude-hook', claudeEntry],
+      ['codex-hook', codexEntry],
+    ].filter(([, entry]) => fs.existsSync(entry)),
+  );
+  if (Object.keys(entries).length === 0) return;
+  const hooksOutdir = path.join(__dirname, 'dist', 'hooks');
+  if (fs.existsSync(hooksOutdir)) {
+    fs.rmSync(hooksOutdir, { recursive: true });
+  }
   require('esbuild').buildSync({
     entryPoints: entries,
     bundle: true,
     platform: 'node',
     target: 'node18',
     format: 'cjs',
-    outdir: path.join(__dirname, 'dist', 'hooks'),
+    outdir: hooksOutdir,
     banner: { js: '#!/usr/bin/env node' },
   });
   console.log('✓ Built hooks/ → dist/hooks/');
