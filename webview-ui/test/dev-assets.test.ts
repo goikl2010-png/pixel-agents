@@ -9,6 +9,8 @@
  */
 
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,21 +22,68 @@ import type { AssetIndex, CatalogEntry } from '../../core/src/assets/types.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-async function startDevServer(base: string, port: number): Promise<ViteDevServer> {
-  const server = await createServer({
-    configFile: path.resolve(root, 'vite.config.ts'),
-    base,
-    server: { port, strictPort: false },
-    logLevel: 'silent',
-  });
-  await server.listen();
-  return server;
+const TEST_HOST = '127.0.0.1';
+
+interface RunningDevServer {
+  vite: ViteDevServer;
+  httpServer: http.Server;
 }
 
-function serverUrl(server: ViteDevServer): string {
-  const addr = server.httpServer?.address();
-  const port = typeof addr === 'object' && addr !== null ? addr.port : 5173;
-  return `http://localhost:${port}`;
+async function startDevServer(base: string, port = 0): Promise<RunningDevServer> {
+  const vite = await createServer({
+    configFile: path.resolve(root, 'vite.config.ts'),
+    base,
+    server: { middlewareMode: true },
+    appType: 'spa',
+    logLevel: 'silent',
+  });
+  const httpServer = http.createServer(vite.middlewares);
+  const server = { vite, httpServer };
+
+  try {
+    await listen(httpServer, port);
+    serverUrl(server);
+    return server;
+  } catch (error) {
+    if (httpServer.listening) {
+      await closeNetServer(httpServer);
+    }
+    await vite.close();
+    throw error;
+  }
+}
+
+function serverUrl(server: RunningDevServer): string {
+  const addr = server.httpServer.address();
+  if (typeof addr !== 'object' || addr === null || !server.httpServer.listening) {
+    throw new Error('Vite test server did not establish a listening TCP address');
+  }
+  return `http://${TEST_HOST}:${addr.port.toString()}`;
+}
+
+async function closeServer(server: RunningDevServer): Promise<void> {
+  try {
+    await closeNetServer(server.httpServer);
+  } finally {
+    await server.vite.close();
+  }
+  assert.equal(server.httpServer.listening, false, 'Vite test server should release its port');
+}
+
+async function listen(server: net.Server, port = 0): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, TEST_HOST, resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  return address.port;
+}
+
+async function closeNetServer(server: net.Server): Promise<void> {
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
 }
 
 function assetUrl(baseUrl: string, basePath: string, relPath: string): string {
@@ -85,19 +134,38 @@ async function verifyAssetUrls(baseUrl: string, basePath: string): Promise<void>
 }
 
 test('asset-index.json is accessible without a subpath (base: /)', async () => {
-  const server = await startDevServer('/', 5174);
+  const server = await startDevServer('/');
   try {
     await verifyAssetUrls(serverUrl(server), '/');
   } finally {
-    await server.close();
+    await closeServer(server);
   }
 });
 
 test('asset-index.json is accessible with a subpath (base: /sub/)', async () => {
-  const server = await startDevServer('/sub/', 5175);
+  const server = await startDevServer('/sub/');
   try {
     await verifyAssetUrls(serverUrl(server), '/sub/');
   } finally {
-    await server.close();
+    await closeServer(server);
   }
+});
+
+test('fails clearly when the requested port is already owned', async () => {
+  const owner = net.createServer();
+  const port = await listen(owner);
+
+  try {
+    await assert.rejects(startDevServer('/', port), /EADDRINUSE|address already in use/i);
+  } finally {
+    await closeNetServer(owner);
+  }
+});
+
+test('fails clearly when no listening address is available', () => {
+  const httpServer = http.createServer();
+  assert.throws(
+    () => serverUrl({ vite: {} as ViteDevServer, httpServer }),
+    /did not establish a listening TCP address/,
+  );
 });
