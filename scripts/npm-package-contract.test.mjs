@@ -34,12 +34,17 @@ test('extracts pack JSON after lifecycle build output', () => {
   assert.deepEqual(parsePackJsonOutput(output), metadata);
 });
 
-test('rejects a known-bad tarball missing the shipped hook', () => {
-  const files = validFiles().filter((file) => file.path !== 'dist/hooks/claude-hook.js');
-  assert.throws(
-    () => validatePackageFiles(files),
-    /missing required file: dist\/hooks\/claude-hook\.js/,
-  );
+test('rejects nested-only hook artifacts at either declared package path', () => {
+  for (const hook of ['claude-hook.js', 'codex-hook.js']) {
+    const requiredPath = `dist/hooks/${hook}`;
+    const files = validFiles()
+      .filter((file) => file.path !== requiredPath)
+      .concat({ path: `dist/hooks/provider/${hook}` });
+    assert.throws(
+      () => validatePackageFiles(files),
+      new RegExp(`missing required file: ${requiredPath.replaceAll('/', '\\/').replaceAll('.', '\\.')}`),
+    );
+  }
 });
 
 test('rejects source and preview files even when required files exist', () => {
