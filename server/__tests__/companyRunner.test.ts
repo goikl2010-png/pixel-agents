@@ -938,6 +938,32 @@ it('fails closed when heartbeat persistence is lost during dispatch', async () =
   ).rejects.toThrow();
 });
 
+it('fails closed when dispatch completion races ahead of the first heartbeat', async () => {
+  const { root, stateDir } = await fixture();
+  const dispatcher = new FakeAgentDispatcher();
+  dispatcher.dispatch = async () => {
+    await rm(path.join(stateDir, 'leases', 'TASK-016.lock'));
+    return {
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: true,
+    };
+  };
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher,
+      githubResolver,
+      heartbeatMs: 60_000,
+    }),
+  ).rejects.toThrow();
+});
+
 it('bounds idle event loss without polling or redispatch', async () => {
   const { root, stateDir } = await fixture();
   const fake = new FakeAgentDispatcher();

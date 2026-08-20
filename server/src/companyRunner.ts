@@ -1165,22 +1165,24 @@ export class TaskLease {
     await fs.unlink(this.file);
   }
   async renew(runId: string): Promise<void> {
-    const lease = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
-    if (lease.run_id !== runId) throw new Error('Lease heartbeat refused: owner mismatch.');
-    const now = Date.now();
-    const renewed = {
-      ...lease,
-      heartbeat_at: new Date(now).toISOString(),
-      expires_at: new Date(now + this.ttlMs).toISOString(),
-    };
-    const temporary = `${this.file}.${runId}.renew`;
-    await fs.writeFile(temporary, JSON.stringify(renewed), { flag: 'wx' });
-    const current = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
-    if (current.run_id !== runId) {
-      await fs.unlink(temporary).catch(() => undefined);
-      throw new Error('Lease ownership changed during heartbeat.');
+    const handle = await fs.open(this.file, 'r+');
+    try {
+      const lease = JSON.parse(await handle.readFile('utf8')) as Lease;
+      if (lease.run_id !== runId) throw new Error('Lease heartbeat refused: owner mismatch.');
+      const now = Date.now();
+      const renewed = JSON.stringify({
+        ...lease,
+        heartbeat_at: new Date(now).toISOString(),
+        expires_at: new Date(now + this.ttlMs).toISOString(),
+      });
+      await handle.truncate(0);
+      await handle.write(renewed, 0, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
-    await fs.rename(temporary, this.file);
+    const current = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
+    if (current.run_id !== runId) throw new Error('Lease ownership changed during heartbeat.');
   }
   async bind(runId: string, decision: RunnerDecision): Promise<void> {
     const lease = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
@@ -1457,6 +1459,11 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
     }
     await heartbeatWork;
     if (heartbeatFailure) throw heartbeatFailure;
+    // Timers are advisory under event-loop load: dispatch may settle before the
+    // first interval callback runs.  Persist and verify one final heartbeat so
+    // success can never be reported after lease persistence or ownership loss.
+    await lease.renew(runId);
+    await append('lease_heartbeat', 'RENEWED', { checkpoint: 'post_dispatch' });
     const postTask = await readRunnerTask(options.companyRoot, options.taskId);
     let postOutcome = 'UNCHANGED';
     if (postTask.bytes !== task.bytes) {
