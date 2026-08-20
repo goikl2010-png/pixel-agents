@@ -7,11 +7,18 @@ import {
   buildGovernedChildEnvironment,
   CodexAgentDispatcher,
   decideRunnerAction,
+  evaluateGovernanceAction,
   FakeAgentDispatcher,
+  GhCliGitHubFactResolver,
+  type GitHubFactResolver,
   readRunnerTask,
+  runCompany,
   runCompanyOnce,
   RunnerLedger,
   runnerStatus,
+  TaskLease,
+  TransientPrelaunchError,
+  validateApprovalPackage,
 } from '../src/companyRunner.js';
 import { LIFECYCLE_STATES, storageForLifecycleState } from '../src/handoffTransitionPlanner.js';
 
@@ -29,6 +36,22 @@ const owners = {
   COMPLETED: 'Alex',
   BLOCKED: 'Alex',
 } as const;
+const githubFacts = {
+  repository: 'owner/repo',
+  issue: 22,
+  issueState: 'OPEN' as const,
+  pr: 23,
+  prState: 'OPEN' as const,
+  draft: true,
+  base: 'main',
+  branch: 'task/TASK-016-company-runner-v1',
+  head: 'a'.repeat(40),
+};
+const githubResolver: GitHubFactResolver = { resolve: async () => githubFacts };
+const approvalSchemaPath = path.resolve(
+  __dirname,
+  '../../docs/schemas/company-runner-approval-v1.schema.json',
+);
 async function fixture(state = 'DEVELOPMENT', owner: string = 'Nova', resume = 'None') {
   const root = await mkdtemp(path.join(tmpdir(), 'runner-v1-'));
   roots.push(root);
@@ -40,9 +63,14 @@ async function fixture(state = 'DEVELOPMENT', owner: string = 'Nova', resume = '
   const storage =
     state === 'BLOCKED' ? 'active' : storageForLifecycleState(state as keyof typeof owners)!;
   const task = path.join(root, 'tasks', storage, 'task.md');
+  await mkdir(path.join(root, 'documentation', 'qa'), { recursive: true });
+  await writeFile(
+    path.join(root, 'documentation', 'qa', 'report.md'),
+    `PASSED at ${'a'.repeat(40)}\n`,
+  );
   await writeFile(
     task,
-    `# TASK-016\n- **Task ID:** TASK-016\n- **Owner:** ${owner}\n- **Current state:** ${state}\n- **Resume state (required only when BLOCKED):** ${resume}\n- **Evidence link:** \`documentation/qa/report.md\`\n`,
+    `# TASK-016\n- **Task ID:** TASK-016\n- **Owner:** ${owner}\n- **Current state:** ${state}\n- **Resume state (required only when BLOCKED):** ${resume}\n- **Repository:** owner/repo\n- **GitHub Issue URL/number:** Issue #22\n- **Pull Request URL/number:** PR #23\n- **Base branch:** main\n- **Feature branch:** task/TASK-016-company-runner-v1\n- **Current PR head commit:** ${'a'.repeat(40)}\n- **Evidence link:** \`documentation/qa/report.md\`\n`,
   );
   return { root, task, stateDir: path.join(root, '.runner') };
 }
@@ -91,6 +119,7 @@ it('is deterministic and dry-run invokes no agent', async () => {
     stateDirectory: stateDir,
     dispatcher: fake,
     dryRun: true,
+    githubResolver,
   });
   expect(result.outcome).toBe('DRY_RUN');
   expect(fake.calls).toHaveLength(0);
@@ -106,6 +135,8 @@ it('dispatches once and unchanged restart invokes no agent', async () => {
         taskId: 'TASK-016',
         stateDirectory: stateDir,
         dispatcher: first,
+        githubResolver,
+        approvalSchemaPath,
       })
     ).outcome,
   ).toBe('DISPATCHED');
@@ -117,6 +148,7 @@ it('dispatches once and unchanged restart invokes no agent', async () => {
         taskId: 'TASK-016',
         stateDirectory: stateDir,
         dispatcher: second,
+        githubResolver,
       })
     ).outcome,
   ).toBe('NO_ACTION_UNCHANGED');
@@ -124,9 +156,171 @@ it('dispatches once and unchanged restart invokes no agent', async () => {
   expect(second.calls).toHaveLength(0);
   await expect(runnerStatus(root, 'TASK-016', stateDir)).resolves.toMatchObject({
     dispatch_count: 1,
-    lease: 'free',
+    lease: { status: 'free' },
     model: 'fake',
   });
+});
+
+it('fails closed before dispatch for missing evidence or unavailable/conflicting GitHub facts', async () => {
+  const { root, stateDir } = await fixture();
+  const fake = new FakeAgentDispatcher();
+  await rm(path.join(root, 'documentation', 'qa', 'report.md'));
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher: fake,
+    }),
+  ).rejects.toThrow('evidence');
+  expect(fake.calls).toHaveLength(0);
+
+  const second = await fixture();
+  await expect(
+    runCompanyOnce({
+      companyRoot: second.root,
+      taskId: 'TASK-016',
+      stateDirectory: second.stateDir,
+      dispatcher: fake,
+    }),
+  ).rejects.toThrow('GitHub facts');
+  const conflicting: GitHubFactResolver = {
+    resolve: async () => ({ ...githubFacts, head: 'b'.repeat(40) }),
+  };
+  await expect(
+    runCompanyOnce({
+      companyRoot: second.root,
+      taskId: 'TASK-016',
+      stateDirectory: second.stateDir,
+      dispatcher: fake,
+      githubResolver: conflicting,
+    }),
+  ).rejects.toThrow('conflicts');
+  expect(fake.calls).toHaveLength(0);
+});
+
+it('resolves typed live GitHub facts through fixed gh API paths without disclosing credentials', async () => {
+  const { root } = await fixture();
+  const task = await readRunnerTask(root, 'TASK-016');
+  const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+  const resolver = new GhCliGitHubFactResolver({
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    parentEnvironment: { GH_TOKEN: 'fake-live-fact-sentinel', PATH: 'safe' },
+    run: async (_executable, args, env) => {
+      calls.push({ args, env });
+      return args[1].includes('/issues/')
+        ? { state: 'open' }
+        : {
+            state: 'open',
+            draft: true,
+            merged_at: null,
+            base: { ref: 'main' },
+            head: { ref: githubFacts.branch, sha: githubFacts.head },
+          };
+    },
+  });
+  await expect(resolver.resolve(task, new AbortController().signal)).resolves.toEqual(githubFacts);
+  expect(calls).toHaveLength(2);
+  expect(calls.every((call) => call.env.GH_TOKEN === 'fake-live-fact-sentinel')).toBe(true);
+  expect(JSON.stringify(calls.map((call) => call.args))).not.toContain('fake-live-fact-sentinel');
+});
+
+it('serializes a real concurrent race to one dispatch', async () => {
+  const { root, stateDir } = await fixture();
+  const slow = new FakeAgentDispatcher();
+  slow.dispatch = async (packet, signal) => {
+    slow.calls.push(packet);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    return {
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: !signal.aborted,
+    };
+  };
+  const other = new FakeAgentDispatcher();
+  const base = { companyRoot: root, taskId: 'TASK-016', stateDirectory: stateDir, githubResolver };
+  const [a, b] = await Promise.all([
+    runCompanyOnce({ ...base, dispatcher: slow }),
+    runCompanyOnce({ ...base, dispatcher: other }),
+  ]);
+  expect([a.outcome, b.outcome]).toContain('LEASE_CONTENDED');
+  expect(slow.calls.length + other.calls.length).toBe(1);
+  expect(await new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl')).read()).not.toHaveLength(0);
+});
+
+it('renews leases atomically and refuses owner-mismatched release', async () => {
+  const { root, stateDir } = await fixture();
+  const decision = decideRunnerAction(await readRunnerTask(root, 'TASK-016'));
+  const lease = new TaskLease(path.join(stateDir, 'leases', 'TASK-016.lock'), 50);
+  expect(await lease.acquire(decision, 'owner')).toBe('acquired');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await lease.renew('owner');
+  await expect(lease.release('intruder')).rejects.toThrow('owner mismatch');
+  await lease.release('owner');
+});
+
+it('retries only one explicitly transient pre-launch failure', async () => {
+  const { root, stateDir } = await fixture();
+  let calls = 0;
+  const dispatcher = {
+    dispatch: async () => {
+      calls++;
+      if (calls === 1) throw new TransientPrelaunchError('temporary spawn refusal');
+      return {
+        exitCode: 0,
+        timedOut: false,
+        model: 'fake' as const,
+        inputTokens: 0 as const,
+        outputTokens: 0 as const,
+        launched: true,
+      };
+    },
+  };
+  await runCompanyOnce({
+    companyRoot: root,
+    taskId: 'TASK-016',
+    stateDirectory: stateDir,
+    dispatcher,
+    githubResolver,
+  });
+  expect(calls).toBe(2);
+  expect((await runnerStatus(root, 'TASK-016', stateDir)).retry_count).toBe(1);
+});
+
+it('defaults to one dispatch and enforces the hard four-dispatch process ceiling', async () => {
+  const { root, stateDir } = await fixture();
+  const fake = new FakeAgentDispatcher();
+  const result = await runCompany({
+    companyRoot: root,
+    taskId: 'TASK-016',
+    stateDirectory: stateDir,
+    dispatcher: fake,
+    githubResolver,
+  });
+  expect(result.stop_reason).toBe('RUN_ONCE');
+  expect(fake.calls).toHaveLength(1);
+  await expect(
+    runCompany({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: path.join(root, '.other-runner'),
+      dispatcher: new FakeAgentDispatcher(),
+      githubResolver,
+      maxDispatches: 5,
+    }),
+  ).rejects.toThrow('one through four');
+});
+
+it('classifies governance effects deterministically and validates complete packages', async () => {
+  expect(evaluateGovernanceAction(['READ_ONLY'], 'managed-on-request')).toBe('GREEN');
+  expect(evaluateGovernanceAction(['PR_UPDATE'], 'managed-on-request')).toBe('YELLOW');
+  expect(evaluateGovernanceAction(['MAIN_MERGE'], 'managed-on-request')).toBe('RED');
+  expect(evaluateGovernanceAction(['AMBIGUOUS'], 'managed-on-request')).toBe('UNKNOWN');
+  expect(evaluateGovernanceAction(['READ_ONLY'])).toBe('UNKNOWN');
+  expect(() => validateApprovalPackage({} as never)).toThrow('contract');
 });
 
 it.each([
@@ -147,6 +341,8 @@ it.each([
         taskId: 'TASK-016',
         stateDirectory: stateDir,
         dispatcher: fake,
+        githubResolver,
+        approvalSchemaPath,
       })
     ).outcome,
   ).toBe(outcome);
@@ -161,6 +357,7 @@ it('detects ledger tampering', async () => {
     stateDirectory: stateDir,
     dispatcher: new FakeAgentDispatcher(),
     dryRun: true,
+    githubResolver,
   });
   const file = path.join(stateDir, 'TASK-016.jsonl');
   await writeFile(file, (await readFile(file, 'utf8')).replace('DRY_RUN', 'ALTERED'));
@@ -182,6 +379,7 @@ it('rejects Codex substitution and version drift before launch', async () => {
       executable: 'other',
       allowedExecutable: 'codex',
       workingRoot: path.resolve('.'),
+      approvedWorkingRoot: path.resolve('.'),
       timeoutMs: 10,
       credentialEnvironmentVariable: 'GH_TOKEN',
       parentEnvironment: { GH_TOKEN: 'fake-sentinel' },
@@ -193,6 +391,7 @@ it('rejects Codex substitution and version drift before launch', async () => {
       executable: 'codex',
       allowedExecutable: 'codex',
       workingRoot: path.resolve('.'),
+      approvedWorkingRoot: path.resolve('.'),
       timeoutMs: 10,
       credentialEnvironmentVariable: 'GH_TOKEN',
       parentEnvironment: { GH_TOKEN: 'fake-sentinel' },
@@ -278,6 +477,7 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
     executable: 'codex',
     allowedExecutable: 'codex',
     workingRoot: path.resolve('.'),
+    approvedWorkingRoot: path.resolve('.'),
     timeoutMs: 10,
     credentialEnvironmentVariable: 'GH_TOKEN',
     parentEnvironment: { GH_TOKEN: sentinel, PATH: 'safe-path' },
@@ -285,6 +485,7 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
       probeEnvironment = environment;
       return 'codex-cli 0.148.0';
     },
+    capabilityProbe: async () => 'exec --json --output-schema --cd --sandbox',
     spawnProcess: async (_executable, args, _cwd, _timeout, _signal, environment) => {
       capturedArgs = args;
       capturedEnvironment = environment;
@@ -323,6 +524,7 @@ it('refuses absent credential before probe or child launch', async () => {
     executable: 'codex',
     allowedExecutable: 'codex',
     workingRoot: path.resolve('.'),
+    approvedWorkingRoot: path.resolve('.'),
     timeoutMs: 10,
     credentialEnvironmentVariable: 'GH_TOKEN',
     parentEnvironment: {},

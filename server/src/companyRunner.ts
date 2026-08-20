@@ -13,6 +13,44 @@ import {
 
 export const RUNNER_SCHEMA_VERSION = '1' as const;
 export type ApprovalClass = 'GREEN' | 'YELLOW' | 'RED' | 'UNKNOWN';
+export type GovernedEffect =
+  | 'READ_ONLY'
+  | 'FEATURE_BRANCH_CHANGE'
+  | 'PR_UPDATE'
+  | 'MAIN_MERGE'
+  | 'ISSUE_OR_PR_CLOSE'
+  | 'CREDENTIAL_OPERATION'
+  | 'DEPLOY_OR_PUBLISH'
+  | 'DESTRUCTIVE'
+  | 'SPENDING'
+  | 'PERMISSION_CHANGE'
+  | 'MAJOR_SCOPE'
+  | 'AMBIGUOUS';
+
+export function evaluateGovernanceAction(
+  effects: GovernedEffect[],
+  permissionProfile?: string,
+): ApprovalClass {
+  if (permissionProfile !== 'managed-on-request') return 'UNKNOWN';
+  if (effects.includes('AMBIGUOUS')) return 'UNKNOWN';
+  if (
+    effects.some((effect) =>
+      [
+        'MAIN_MERGE',
+        'ISSUE_OR_PR_CLOSE',
+        'CREDENTIAL_OPERATION',
+        'DEPLOY_OR_PUBLISH',
+        'DESTRUCTIVE',
+        'SPENDING',
+        'PERMISSION_CHANGE',
+        'MAJOR_SCOPE',
+      ].includes(effect),
+    )
+  )
+    return 'RED';
+  if (effects.includes('PR_UPDATE')) return 'YELLOW';
+  return 'GREEN';
+}
 export type RunnerOutcome =
   | 'DISPATCHED'
   | 'DRY_RUN'
@@ -49,6 +87,100 @@ export interface RunnerTask {
   evidence: string[];
 }
 
+export interface VerifiedEvidence {
+  path: string;
+  sha256: string;
+  bytes: string;
+}
+
+export interface GitHubFacts {
+  repository: string;
+  issue: number;
+  issueState: 'OPEN' | 'CLOSED';
+  pr: number;
+  prState: 'OPEN' | 'CLOSED' | 'MERGED';
+  draft: boolean;
+  base: string;
+  branch: string;
+  head: string;
+}
+
+export interface GitHubFactResolver {
+  resolve(task: RunnerTask, signal: AbortSignal): Promise<GitHubFacts>;
+}
+
+export interface GhCliResolverOptions {
+  executable?: 'gh' | 'gh.exe';
+  credentialEnvironmentVariable: 'GH_TOKEN' | 'GITHUB_TOKEN';
+  parentEnvironment?: NodeJS.ProcessEnv;
+  run?: typeof runGhJson;
+}
+
+export class GhCliGitHubFactResolver implements GitHubFactResolver {
+  constructor(private readonly options: GhCliResolverOptions) {}
+  async resolve(task: RunnerTask, signal: AbortSignal): Promise<GitHubFacts> {
+    const expected = taskDeliveryFields(task);
+    if (!expected.repository || !expected.issue || !expected.pr)
+      throw new Error('Authoritative task lacks repository, Issue, or PR identity.');
+    const executable = this.options.executable ?? (process.platform === 'win32' ? 'gh.exe' : 'gh');
+    if (!['gh', 'gh.exe'].includes(executable))
+      throw new Error('GitHub fact resolver executable is not allowlisted.');
+    const environment = buildGovernedChildEnvironment(
+      this.options.parentEnvironment ?? process.env,
+      this.options.credentialEnvironmentVariable,
+    );
+    const run = this.options.run ?? runGhJson;
+    const [issue, pr] = await Promise.all([
+      run(
+        executable,
+        ['api', `repos/${expected.repository}/issues/${expected.issue}`],
+        environment,
+        signal,
+      ),
+      run(
+        executable,
+        ['api', `repos/${expected.repository}/pulls/${expected.pr}`],
+        environment,
+        signal,
+      ),
+    ]);
+    const issueObject = issue as { state?: string };
+    const prObject = pr as {
+      state?: string;
+      draft?: boolean;
+      merged_at?: string | null;
+      base?: { ref?: string };
+      head?: { ref?: string; sha?: string };
+    };
+    if (
+      !['open', 'closed'].includes(issueObject.state ?? '') ||
+      !['open', 'closed'].includes(prObject.state ?? '') ||
+      typeof prObject.draft !== 'boolean' ||
+      !prObject.base?.ref ||
+      !prObject.head?.ref ||
+      !/^[0-9a-f]{40}$/i.test(prObject.head.sha ?? '')
+    )
+      throw new Error('GitHub returned malformed or incomplete action-required facts.');
+    return {
+      repository: expected.repository,
+      issue: expected.issue,
+      issueState: issueObject.state === 'open' ? 'OPEN' : 'CLOSED',
+      pr: expected.pr,
+      prState: prObject.merged_at ? 'MERGED' : prObject.state === 'open' ? 'OPEN' : 'CLOSED',
+      draft: prObject.draft,
+      base: prObject.base.ref,
+      branch: prObject.head.ref,
+      head: prObject.head.sha!,
+    };
+  }
+}
+
+export interface ReconciledFacts {
+  evidence: VerifiedEvidence[];
+  github?: GitHubFacts;
+  permissionProfile: 'managed-on-request';
+}
+
 export interface RunnerDecision {
   schema_version: '1';
   task_id: string;
@@ -60,6 +192,9 @@ export interface RunnerDecision {
   state_fingerprint: string;
   dispatch_id: string;
   reason: string;
+  affected_resources: string[];
+  external_effects: string[];
+  github?: GitHubFacts;
 }
 
 export interface HandoffPacket {
@@ -106,11 +241,13 @@ export class FakeAgentDispatcher implements AgentDispatcher {
 export interface CodexDispatcherOptions {
   executable: string;
   workingRoot: string;
+  approvedWorkingRoot?: string;
   allowedExecutable: string;
   timeoutMs: number;
   credentialEnvironmentVariable: 'GH_TOKEN' | 'GITHUB_TOKEN';
   parentEnvironment?: NodeJS.ProcessEnv;
   versionProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
+  capabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   spawnProcess?: typeof spawnDirect;
 }
 
@@ -124,8 +261,18 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     const executable = path.resolve(this.options.executable);
     if (executable !== path.resolve(this.options.allowedExecutable))
       throw new Error('Configured Codex executable is not allowlisted.');
-    const root = path.resolve(this.options.workingRoot);
-    if (!path.isAbsolute(root)) throw new Error('Codex working root must be absolute.');
+    if (!path.isAbsolute(this.options.workingRoot))
+      throw new Error('Codex working root must be absolute.');
+    if (!this.options.approvedWorkingRoot || !path.isAbsolute(this.options.approvedWorkingRoot))
+      throw new Error('An explicit absolute approved Codex working root is required.');
+    const root = await fs.realpath(this.options.workingRoot);
+    const approved = await fs.realpath(this.options.approvedWorkingRoot);
+    const parsed = path.parse(approved);
+    if (approved === parsed.root || approved.split(path.sep).filter(Boolean).length < 2)
+      throw new Error('Broad filesystem roots are not approved Codex working roots.');
+    const relative = path.relative(approved, root);
+    if (relative.startsWith('..') || path.isAbsolute(relative))
+      throw new Error('Codex working root escapes the approved root.');
     const childEnvironment = buildGovernedChildEnvironment(
       this.options.parentEnvironment ?? process.env,
       this.options.credentialEnvironmentVariable,
@@ -138,6 +285,20 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     );
     if (!/codex-cli\s+0\.(?:1(?:4[8-9]|[5-9]\d)|[2-9]\d\d)\./i.test(version))
       throw new Error(`Unsupported Codex CLI capability version: ${version}`);
+    const capabilities = await (this.options.capabilityProbe ?? probeCodexCapabilities)(
+      executable,
+      probeEnvironment,
+    );
+    for (const capability of ['exec', '--json', '--output-schema', '--cd', '--sandbox']) {
+      if (!capabilities.includes(capability))
+        throw new Error(`Unsupported Codex CLI capability surface: missing ${capability}.`);
+    }
+    const outputSchema = JSON.stringify({
+      type: 'object',
+      additionalProperties: false,
+      required: ['outcome'],
+      properties: { outcome: { enum: ['completed', 'blocked', 'failed'] } },
+    });
     const prompt = JSON.stringify(packet);
     const args = [
       'exec',
@@ -148,6 +309,8 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       'on-request',
       '--cd',
       root,
+      '--output-schema',
+      outputSchema,
       prompt,
     ];
     if (args.some((argument) => FORBIDDEN_ARGUMENT.test(argument)))
@@ -269,6 +432,53 @@ async function probeCodexVersion(
   });
 }
 
+async function probeCodexCapabilities(
+  executable: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, ['exec', '--help'], {
+      env: environment,
+      shell: false,
+      windowsHide: true,
+    });
+    let output = '';
+    child.stdout.on('data', (data: Buffer) => (output += data.toString('utf8')));
+    child.stderr.on('data', (data: Buffer) => (output += data.toString('utf8')));
+    child.once('error', reject);
+    child.once('close', (code) =>
+      code === 0 ? resolve(`exec\n${output}`) : reject(new Error('Codex capability probe failed.')),
+    );
+  });
+}
+
+async function runGhJson(
+  executable: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+  signal: AbortSignal,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      env: environment,
+      shell: false,
+      windowsHide: true,
+      signal,
+    });
+    let output = '';
+    child.stdout.on('data', (data: Buffer) => (output += data.toString('utf8')));
+    child.once('error', () => reject(new Error('GitHub fact resolver failed before completion.')));
+    child.once('close', (code) => {
+      if (code !== 0) return reject(new Error('GitHub fact resolver returned a nonzero status.'));
+      try {
+        resolve(JSON.parse(output));
+      } catch {
+        reject(new Error('GitHub fact resolver returned malformed JSON.'));
+      }
+    });
+  });
+}
+
 async function spawnDirect(
   executable: string,
   args: string[],
@@ -278,30 +488,30 @@ async function spawnDirect(
   env: NodeJS.ProcessEnv,
 ): Promise<DispatchResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true, signal });
+    const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true });
     let settled = false;
+    let timedOut = false;
     const finish = (result: DispatchResult): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(forceTimer);
+      signal.removeEventListener('abort', terminate);
       resolve(result);
     };
-    const timer = setTimeout(() => {
+    const terminate = (): void => {
+      timedOut = true;
       child.kill('SIGTERM');
-      finish({
-        exitCode: null,
-        timedOut: true,
-        model: 'unknown',
-        inputTokens: 'unknown',
-        outputTokens: 'unknown',
-        launched: true,
-      });
-    }, timeoutMs);
+      forceTimer = setTimeout(() => child.kill('SIGKILL'), Math.min(5_000, timeoutMs));
+    };
+    let forceTimer: NodeJS.Timeout | undefined;
+    const timer = setTimeout(terminate, timeoutMs);
+    signal.addEventListener('abort', terminate, { once: true });
     child.once('error', reject);
     child.once('close', (code) =>
       finish({
         exitCode: code,
-        timedOut: false,
+        timedOut,
         model: 'unknown',
         inputTokens: 'unknown',
         outputTokens: 'unknown',
@@ -377,9 +587,11 @@ export async function readRunnerTask(companyRoot: string, taskId: string): Promi
     throw new Error('BLOCKED requires an exact valid nonterminal Resume state.');
   if (lifecycleState !== 'BLOCKED' && resumeState)
     throw new Error('Resume state is valid only for BLOCKED.');
-  const evidence = [...match.bytes.matchAll(/`((?:documentation|tasks)[^`]+)`/g)]
-    .map((item) => item[1])
-    .sort();
+  const evidence = [
+    ...new Set(
+      [...match.bytes.matchAll(/`((?:documentation|tasks)[^`]+)`/g)].map((item) => item[1]),
+    ),
+  ].sort();
   return {
     id: taskId,
     path: path.resolve(match.file),
@@ -392,13 +604,113 @@ export async function readRunnerTask(companyRoot: string, taskId: string): Promi
   };
 }
 
-export function decideRunnerAction(task: RunnerTask, githubFacts = ''): RunnerDecision {
+function canonicalFactBytes(facts?: ReconciledFacts): string {
+  if (!facts) return '';
+  return JSON.stringify({
+    evidence: facts.evidence.map(({ path: file, sha256: hash }) => ({ path: file, sha256: hash })),
+    github: facts.github,
+    permission_profile: facts.permissionProfile,
+  });
+}
+
+function taskDeliveryFields(task: RunnerTask): Partial<GitHubFacts> {
+  const oneOptional = (name: string): string | undefined => {
+    const values = field(task.bytes, name).filter((value) => !/pending|n\/a/i.test(value));
+    if (values.length > 1) throw new Error(`Conflicting ${name} fields.`);
+    return values[0];
+  };
+  const numberFrom = (value?: string): number | undefined => {
+    const match = value?.match(/#?(\d+)/);
+    return match ? Number(match[1]) : undefined;
+  };
+  return {
+    repository: oneOptional('Repository'),
+    issue: numberFrom(oneOptional('GitHub Issue URL/number')),
+    pr: numberFrom(oneOptional('Pull Request URL/number')),
+    base: oneOptional('Base branch'),
+    branch: oneOptional('Feature branch'),
+    head: oneOptional('Current PR head commit'),
+  };
+}
+
+export async function reconcileRunnerFacts(
+  companyRoot: string,
+  task: RunnerTask,
+  resolver?: GitHubFactResolver,
+  signal: AbortSignal = new AbortController().signal,
+): Promise<ReconciledFacts> {
+  const seen = new Set<string>();
+  const evidence: VerifiedEvidence[] = [];
+  for (const linked of task.evidence) {
+    const normalized = linked.replace(/\\/g, '/');
+    if (seen.has(normalized)) throw new Error(`Duplicate evidence pointer ${normalized}.`);
+    seen.add(normalized);
+    const absolute = path.resolve(companyRoot, normalized);
+    const relative = path.relative(path.resolve(companyRoot), absolute);
+    if (relative.startsWith('..') || path.isAbsolute(relative))
+      throw new Error(`Evidence path escapes company root: ${normalized}.`);
+    let bytes: string;
+    try {
+      bytes = await fs.readFile(absolute, 'utf8');
+    } catch {
+      throw new Error(`Required evidence is missing or unreadable: ${normalized}.`);
+    }
+    evidence.push({ path: normalized, sha256: sha256(bytes), bytes });
+  }
+  evidence.sort((a, b) => a.path.localeCompare(b.path));
+  if (task.state !== 'BACKLOG' && task.state !== 'COMPLETED' && evidence.length === 0)
+    throw new Error(`Required evidence is absent for ${task.state}.`);
+
+  let github: GitHubFacts | undefined;
+  if (task.state !== 'COMPLETED') {
+    if (!resolver) throw new Error('Action-required live GitHub facts are unavailable.');
+    github = await resolver.resolve(task, signal);
+    const expected = taskDeliveryFields(task);
+    for (const key of ['repository', 'issue', 'pr', 'base', 'branch', 'head'] as const) {
+      if (expected[key] !== undefined && expected[key] !== github[key])
+        throw new Error(`Live GitHub ${key} conflicts with the authoritative task.`);
+    }
+    if (github.issueState !== 'OPEN') throw new Error('Action-required GitHub Issue is not OPEN.');
+    if (github.prState !== 'OPEN' && task.state !== 'BACKLOG')
+      throw new Error('Action-required Pull Request is not OPEN.');
+    if (['READY_FOR_REVIEW', 'REVIEW', 'APPROVED'].includes(task.state)) {
+      const covering = evidence.filter(
+        (item) => item.bytes.includes(github!.head) && /\bPASSED\b/i.test(item.bytes),
+      );
+      if (covering.length !== 1)
+        throw new Error('Exactly one current-head PASSED QA evidence record is required.');
+    }
+    if (task.state === 'CHANGES_REQUIRED') {
+      const covering = evidence.filter(
+        (item) => item.bytes.includes(github!.head) && /CHANGES REQUIRED/i.test(item.bytes),
+      );
+      if (covering.length !== 1)
+        throw new Error('Exactly one current-head CHANGES REQUIRED evidence record is required.');
+    }
+  }
+  return { evidence, ...(github ? { github } : {}), permissionProfile: 'managed-on-request' };
+}
+
+export function decideRunnerAction(task: RunnerTask, facts?: ReconciledFacts): RunnerDecision {
   const fingerprint = sha256(
-    `${task.path.replace(/\\/g, '/')}\n${task.bytes}\n${task.evidence.join('\n')}\n${githubFacts}`,
+    `${task.path.replace(/\\/g, '/')}\n${task.bytes}\n${canonicalFactBytes(facts)}`,
   );
   let action: RunnerDecision['action_kind'] = 'DISPATCH_ROLE';
-  let classification: ApprovalClass = 'GREEN';
+  const contemplated: GovernedEffect[] =
+    task.state === 'APPROVED'
+      ? ['MAIN_MERGE', 'ISSUE_OR_PR_CLOSE']
+      : task.state === 'BLOCKED'
+        ? ['AMBIGUOUS']
+        : ['READ_ONLY'];
+  let classification: ApprovalClass = evaluateGovernanceAction(
+    contemplated,
+    facts?.permissionProfile,
+  );
   let reason = `Dispatch the role that owns ${task.state}; the role remains responsible for evidence and transition decisions.`;
+  const affectedResources = [task.path, ...(facts?.evidence.map((item) => item.path) ?? [])];
+  const externalEffects = facts?.github
+    ? [`Read GitHub Issue #${facts.github.issue} and PR #${facts.github.pr}`]
+    : [];
   if (task.state === 'COMPLETED') {
     action = 'STOP_TERMINAL';
     reason = 'COMPLETED is terminal.';
@@ -421,6 +733,9 @@ export function decideRunnerAction(task: RunnerTask, githubFacts = ''): RunnerDe
     state_fingerprint: fingerprint,
     dispatch_id: dispatchId,
     reason,
+    affected_resources: affectedResources,
+    external_effects: externalEffects,
+    ...(facts?.github ? { github: facts.github } : {}),
   };
 }
 
@@ -436,7 +751,7 @@ export interface ApprovalPackage {
   affected_files_resources: string[];
   branch_pr: { repository: string; branch: string; pr: number | null; head: string };
   external_effects: string[];
-  risk_approval_class: 'RED' | 'UNKNOWN';
+  risk_approval_class: 'YELLOW' | 'RED' | 'UNKNOWN';
   recommended_next_action: string;
   evidence: string[];
   run_id: string;
@@ -448,8 +763,8 @@ export function approvalPackage(
   runId: string,
   evidence: string[],
 ): ApprovalPackage {
-  if (decision.classification !== 'RED' && decision.classification !== 'UNKNOWN')
-    throw new Error('Approval package requires RED or UNKNOWN classification.');
+  if (decision.classification === 'GREEN')
+    throw new Error('Approval package requires a non-GREEN classification.');
   return {
     schema_version: RUNNER_SCHEMA_VERSION,
     request_id: sha256(`${runId}\n${decision.dispatch_id}\n${decision.classification}`),
@@ -463,9 +778,21 @@ export function approvalPackage(
     workflow_state: decision.state,
     requested_action: decision.action_kind,
     reason: decision.reason,
-    affected_files_resources: [decision.task_path],
-    branch_pr: { repository: 'unknown', branch: 'unknown', pr: null, head: 'unknown' },
-    external_effects: [],
+    affected_files_resources: decision.affected_resources,
+    branch_pr: decision.github
+      ? {
+          repository: decision.github.repository,
+          branch: decision.github.branch,
+          pr: decision.github.pr,
+          head: decision.github.head,
+        }
+      : {
+          repository: 'local-company-record',
+          branch: 'not-applicable',
+          pr: null,
+          head: 'not-applicable',
+        },
+    external_effects: decision.external_effects,
     risk_approval_class: decision.classification,
     recommended_next_action:
       'Alex/Goi decision and fresh evidence required; do not dispatch automatically.',
@@ -473,6 +800,56 @@ export function approvalPackage(
     run_id: runId,
     dispatch_id: decision.dispatch_id,
   };
+}
+
+export function validateApprovalPackage(value: ApprovalPackage): void {
+  const sha = /^sha256:[0-9a-f]{64}$/;
+  if (
+    value.schema_version !== '1' ||
+    !sha.test(value.request_id) ||
+    !sha.test(value.task.fingerprint) ||
+    !sha.test(value.dispatch_id) ||
+    !/^TASK-\d+$/.test(value.task.id) ||
+    !EMPLOYEE_IDENTITIES.includes(value.agent) ||
+    !LIFECYCLE_STATES.includes(value.workflow_state) ||
+    !['YELLOW', 'RED', 'UNKNOWN'].includes(value.risk_approval_class) ||
+    !value.requested_action ||
+    !value.reason ||
+    !value.recommended_next_action ||
+    !value.run_id ||
+    value.affected_files_resources.length === 0 ||
+    !value.branch_pr.repository ||
+    !value.branch_pr.branch ||
+    !value.branch_pr.head ||
+    Number.isNaN(Date.parse(value.created_at))
+  )
+    throw new Error('Approval package failed the checked contract.');
+}
+
+export async function validateApprovalPackageSchema(
+  value: ApprovalPackage,
+  schemaPath: string,
+): Promise<void> {
+  let schema: {
+    required?: string[];
+    properties?: Record<string, unknown>;
+    additionalProperties?: boolean;
+  };
+  try {
+    schema = JSON.parse(await fs.readFile(schemaPath, 'utf8')) as typeof schema;
+  } catch {
+    throw new Error('Approval package schema is missing, unreadable, or malformed.');
+  }
+  const actualKeys = Object.keys(value).sort();
+  const required = [...(schema.required ?? [])].sort();
+  const declared = Object.keys(schema.properties ?? {}).sort();
+  if (
+    schema.additionalProperties !== false ||
+    JSON.stringify(required) !== JSON.stringify(actualKeys) ||
+    JSON.stringify(declared) !== JSON.stringify(actualKeys)
+  )
+    throw new Error('Approval package schema does not match the runtime contract.');
+  validateApprovalPackage(value);
 }
 
 interface LedgerEvent {
@@ -611,6 +988,24 @@ export class TaskLease {
     if (lease.run_id !== runId) throw new Error('Lease release refused: owner mismatch.');
     await fs.unlink(this.file);
   }
+  async renew(runId: string): Promise<void> {
+    const lease = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
+    if (lease.run_id !== runId) throw new Error('Lease heartbeat refused: owner mismatch.');
+    const now = Date.now();
+    const renewed = {
+      ...lease,
+      heartbeat_at: new Date(now).toISOString(),
+      expires_at: new Date(now + this.ttlMs).toISOString(),
+    };
+    const temporary = `${this.file}.${runId}.renew`;
+    await fs.writeFile(temporary, JSON.stringify(renewed), { flag: 'wx' });
+    const current = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
+    if (current.run_id !== runId) {
+      await fs.unlink(temporary).catch(() => undefined);
+      throw new Error('Lease ownership changed during heartbeat.');
+    }
+    await fs.rename(temporary, this.file);
+  }
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -628,9 +1023,14 @@ export interface RunOnceOptions {
   stateDirectory: string;
   dispatcher: AgentDispatcher;
   dryRun?: boolean;
-  githubFacts?: string;
+  githubResolver?: GitHubFactResolver;
   stopFile?: string;
   timeoutMs?: number;
+  leaseTtlMs?: number;
+  heartbeatMs?: number;
+  circuitFailureThreshold?: number;
+  signal?: AbortSignal;
+  approvalSchemaPath?: string;
 }
 export interface RunOnceResult {
   run_id: string;
@@ -640,10 +1040,26 @@ export interface RunOnceResult {
   approval?: ApprovalPackage;
 }
 
+export class TransientPrelaunchError extends Error {}
+
+const LEGAL_NEXT: Readonly<Record<LifecycleState, readonly LifecycleState[]>> = {
+  BACKLOG: ['DEVELOPMENT', 'BLOCKED'],
+  DEVELOPMENT: ['READY_FOR_QA', 'BLOCKED'],
+  READY_FOR_QA: ['QA', 'BLOCKED'],
+  QA: ['READY_FOR_REVIEW', 'CHANGES_REQUIRED', 'BLOCKED'],
+  CHANGES_REQUIRED: ['QA_RETEST', 'BLOCKED'],
+  QA_RETEST: ['READY_FOR_REVIEW', 'CHANGES_REQUIRED', 'BLOCKED'],
+  READY_FOR_REVIEW: ['REVIEW', 'BLOCKED'],
+  REVIEW: ['APPROVED', 'CHANGES_REQUIRED', 'BLOCKED'],
+  APPROVED: ['COMPLETED', 'BLOCKED'],
+  COMPLETED: [],
+  BLOCKED: [],
+};
+
 export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const runId = randomUUID();
   const task = await readRunnerTask(options.companyRoot, options.taskId);
-  const decision = decideRunnerAction(task, options.githubFacts);
+  let decision = decideRunnerAction(task);
   const ledger = new RunnerLedger(path.join(options.stateDirectory, `${task.id}.jsonl`));
   const append = (type: string, outcome: string, details: Record<string, unknown> = {}) =>
     ledger.append({
@@ -654,9 +1070,41 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       outcome,
       details,
     });
-  const previous = await ledger.read();
-  if (
-    previous.some(
+  if (options.stopFile && (await exists(options.stopFile))) {
+    await append('stop', 'STOPPED');
+    return { run_id: runId, outcome: 'STOPPED', decision };
+  }
+  if (task.state === 'COMPLETED') {
+    await append('decision', 'NO_ACTION_TERMINAL');
+    return { run_id: runId, outcome: 'NO_ACTION_TERMINAL', decision };
+  }
+  const lease = new TaskLease(
+    path.join(options.stateDirectory, 'leases', `${task.id}.lock`),
+    options.leaseTtlMs ?? 30_000,
+  );
+  const acquired = await lease.acquire(decision, runId);
+  if (acquired === 'contended') {
+    const contentionDirectory = path.join(options.stateDirectory, 'contention');
+    await fs.mkdir(contentionDirectory, { recursive: true });
+    await fs.writeFile(
+      path.join(contentionDirectory, `${task.id}-${runId}.json`),
+      `${JSON.stringify({
+        schema_version: RUNNER_SCHEMA_VERSION,
+        type: 'lease_contention',
+        task_id: task.id,
+        run_id: runId,
+        outcome: 'LEASE_CONTENDED',
+      })}\n`,
+      { flag: 'wx' },
+    );
+    return { run_id: runId, outcome: 'LEASE_CONTENDED', decision };
+  }
+  await append(acquired === 'recovered' ? 'lease_recovery' : 'lease_acquire', acquired);
+  try {
+    const facts = await reconcileRunnerFacts(options.companyRoot, task, options.githubResolver);
+    decision = decideRunnerAction(task, facts);
+    const previous = await ledger.read();
+    const unresolvedIntent = previous.some(
       (event) =>
         event.dispatch_id === decision.dispatch_id &&
         ['dispatch_intent', 'dispatch_start'].includes(event.type) &&
@@ -664,88 +1112,136 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
           (result) =>
             result.dispatch_id === decision.dispatch_id && result.type === 'dispatch_result',
         ),
-    )
-  ) {
-    await append('recovery', 'RECOVERY_REQUIRED');
-    return { run_id: runId, outcome: 'RECOVERY_REQUIRED', decision };
-  }
-  if (
-    previous.some(
-      (event) => event.dispatch_id === decision.dispatch_id && event.type === 'dispatch_result',
-    )
-  ) {
-    await append('decision', 'NO_ACTION_UNCHANGED');
-    return { run_id: runId, outcome: 'NO_ACTION_UNCHANGED', decision };
-  }
-  if (options.stopFile && (await exists(options.stopFile))) {
-    await append('stop', 'STOPPED');
-    return { run_id: runId, outcome: 'STOPPED', decision };
-  }
-  if (decision.action_kind === 'STOP_TERMINAL') {
-    await append('decision', 'NO_ACTION_TERMINAL');
-    return { run_id: runId, outcome: 'NO_ACTION_TERMINAL', decision };
-  }
-  if (decision.classification === 'RED' || decision.classification === 'UNKNOWN') {
-    const approval = approvalPackage(decision, runId, task.evidence);
-    await fs.mkdir(path.join(options.stateDirectory, 'approvals'), { recursive: true });
-    await fs.writeFile(
-      path.join(
-        options.stateDirectory,
-        'approvals',
-        `${approval.request_id.replace(':', '-')}.json`,
-      ),
-      `${JSON.stringify(approval, null, 2)}\n`,
     );
-    await append('approval_request', 'APPROVAL_REQUIRED', {
-      classification: decision.classification,
-    });
-    return { run_id: runId, outcome: 'APPROVAL_REQUIRED', decision, approval };
-  }
-  if (options.dryRun) {
-    await append('decision', 'DRY_RUN');
-    return { run_id: runId, outcome: 'DRY_RUN', decision };
-  }
-  const lease = new TaskLease(path.join(options.stateDirectory, 'leases', `${task.id}.lock`));
-  const acquired = await lease.acquire(decision, runId);
-  if (acquired === 'contended') {
-    await append('lease_contention', 'LEASE_CONTENDED');
-    return { run_id: runId, outcome: 'LEASE_CONTENDED', decision };
-  }
-  await append(acquired === 'recovered' ? 'lease_recovery' : 'lease_acquire', acquired);
-  try {
-    const refreshed = decideRunnerAction(
-      await readRunnerTask(options.companyRoot, options.taskId),
-      options.githubFacts,
+    if (unresolvedIntent) {
+      await append('recovery', 'RECOVERY_REQUIRED', { blocker: 'ambiguous prior launch' });
+      return { run_id: runId, outcome: 'RECOVERY_REQUIRED', decision };
+    }
+    if (
+      previous.some(
+        (event) => event.dispatch_id === decision.dispatch_id && event.type === 'dispatch_result',
+      )
+    ) {
+      await append('decision', 'NO_ACTION_UNCHANGED');
+      return { run_id: runId, outcome: 'NO_ACTION_UNCHANGED', decision };
+    }
+    const failureCount = previous.filter(
+      (event) => event.type === 'failure' || event.type === 'circuit_break',
+    ).length;
+    if (failureCount >= (options.circuitFailureThreshold ?? 3)) {
+      await append('circuit_break', 'OPEN', { failure_count: failureCount });
+      return { run_id: runId, outcome: 'FAILED', decision };
+    }
+    const refreshedTask = await readRunnerTask(options.companyRoot, options.taskId);
+    const refreshedFacts = await reconcileRunnerFacts(
+      options.companyRoot,
+      refreshedTask,
+      options.githubResolver,
     );
+    const refreshed = decideRunnerAction(refreshedTask, refreshedFacts);
     if (refreshed.dispatch_id !== decision.dispatch_id) {
       await append('failure', 'STALE_STATE');
       return { run_id: runId, outcome: 'FAILED', decision };
     }
+    if (decision.classification !== 'GREEN') {
+      const approval = approvalPackage(
+        decision,
+        runId,
+        facts.evidence.map((item) => item.path),
+      );
+      if (!options.approvalSchemaPath)
+        throw new Error('An explicit checked-in approval schema path is required.');
+      await validateApprovalPackageSchema(approval, options.approvalSchemaPath);
+      await fs.mkdir(path.join(options.stateDirectory, 'approvals'), { recursive: true });
+      await fs.writeFile(
+        path.join(
+          options.stateDirectory,
+          'approvals',
+          `${approval.request_id.replace(':', '-')}.json`,
+        ),
+        `${JSON.stringify(approval, null, 2)}\n`,
+        { flag: 'wx' },
+      );
+      await append('approval_request', 'APPROVAL_REQUIRED', {
+        classification: decision.classification,
+        requested_action: decision.action_kind,
+      });
+      return { run_id: runId, outcome: 'APPROVAL_REQUIRED', decision, approval };
+    }
+    if (options.dryRun) {
+      await append('decision', 'DRY_RUN', { classification: decision.classification });
+      return { run_id: runId, outcome: 'DRY_RUN', decision };
+    }
     await append('dispatch_intent', 'PERSISTED');
     const controller = new AbortController();
+    const externalAbort = (): void => controller.abort();
+    options.signal?.addEventListener('abort', externalAbort, { once: true });
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 120_000);
+    let heartbeatFailure: Error | undefined;
+    let heartbeatWork = Promise.resolve();
+    const heartbeat = setInterval(() => {
+      heartbeatWork = heartbeatWork.then(async () => {
+        try {
+          await lease.renew(runId);
+          await append('lease_heartbeat', 'RENEWED');
+        } catch (error) {
+          heartbeatFailure = error as Error;
+          controller.abort();
+        }
+      });
+    }, options.heartbeatMs ?? 10_000);
+    const stopMonitor = options.stopFile
+      ? setInterval(
+          () => {
+            void exists(options.stopFile!).then((stopped) => stopped && controller.abort());
+          },
+          Math.min(options.heartbeatMs ?? 10_000, 1_000),
+        )
+      : undefined;
     await append('dispatch_start', 'STARTED');
     let dispatch: DispatchResult;
     try {
-      dispatch = await options.dispatcher.dispatch(
-        {
-          schema_version: RUNNER_SCHEMA_VERSION,
-          task: { id: task.id, path: task.path, fingerprint: decision.state_fingerprint },
-          role: task.owner,
-          state: task.state,
-          dispatch_id: decision.dispatch_id,
-          evidence: task.evidence,
-          instruction:
-            'Load the authoritative task and execute only the exact next role-owned governed action. Save evidence before any legal handoff.',
-        },
-        controller.signal,
-      );
+      const packet: HandoffPacket = {
+        schema_version: RUNNER_SCHEMA_VERSION,
+        task: { id: task.id, path: task.path, fingerprint: decision.state_fingerprint },
+        role: task.owner,
+        state: task.state,
+        dispatch_id: decision.dispatch_id,
+        evidence: facts.evidence.map((item) => item.path),
+        instruction:
+          'Load the authoritative task and execute only the exact next role-owned governed action. Save evidence before any legal handoff.',
+      };
+      try {
+        dispatch = await options.dispatcher.dispatch(packet, controller.signal);
+      } catch (error) {
+        if (!(error instanceof TransientPrelaunchError)) throw error;
+        await append('retry', 'TRANSIENT_PRELAUNCH', { attempt: 1 });
+        dispatch = await options.dispatcher.dispatch(packet, controller.signal);
+      }
     } finally {
       clearTimeout(timeout);
+      clearInterval(heartbeat);
+      if (stopMonitor) clearInterval(stopMonitor);
+      options.signal?.removeEventListener('abort', externalAbort);
+    }
+    await heartbeatWork;
+    if (heartbeatFailure) throw heartbeatFailure;
+    const postTask = await readRunnerTask(options.companyRoot, options.taskId);
+    let postOutcome = 'UNCHANGED';
+    if (postTask.bytes !== task.bytes) {
+      if (!LEGAL_NEXT[task.state].includes(postTask.state))
+        throw new Error(`Agent produced illegal transition ${task.state} -> ${postTask.state}.`);
+      await reconcileRunnerFacts(options.companyRoot, postTask, options.githubResolver);
+      postOutcome = 'OBSERVED_TRANSITION';
+      await append('observed_transition', postOutcome, {
+        from: task.state,
+        to: postTask.state,
+        owner: postTask.owner,
+      });
     }
     await append(
       'dispatch_result',
-      dispatch.exitCode === 0 && !dispatch.timedOut ? 'OBSERVATION_REQUIRED' : 'FAILED',
+      dispatch.exitCode === 0 && !dispatch.timedOut ? postOutcome : 'FAILED',
       {
         exit_code: dispatch.exitCode,
         timed_out: dispatch.timedOut,
@@ -755,10 +1251,64 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       },
     );
     return { run_id: runId, outcome: 'DISPATCHED', decision, dispatch };
+  } catch (error) {
+    await append('failure', 'FAILED', {
+      blocker: error instanceof Error ? error.message : 'unknown runner failure',
+    }).catch(() => undefined);
+    throw error;
   } finally {
     await lease.release(runId);
     await append('lease_release', 'RELEASED');
   }
+}
+
+export interface RunLoopOptions extends RunOnceOptions {
+  maxDispatches?: number;
+  idleTimeoutMs?: number;
+  waitForEvent?: (signal: AbortSignal) => Promise<void>;
+}
+
+export interface RunLoopResult {
+  results: RunOnceResult[];
+  stop_reason: 'RUN_ONCE' | 'MAX_DISPATCHES' | 'IDLE_TIMEOUT' | 'OUTCOME_STOP';
+}
+
+/** Event mode is opt-in. It never polls for work and is capped at four launches per process. */
+export async function runCompany(options: RunLoopOptions): Promise<RunLoopResult> {
+  const maximum = options.maxDispatches ?? 1;
+  if (!Number.isInteger(maximum) || maximum < 1 || maximum > 4)
+    throw new Error('Runner dispatch maximum must be an integer from one through four.');
+  const results: RunOnceResult[] = [];
+  let dispatches = 0;
+  while (dispatches < maximum) {
+    const result = await runCompanyOnce(options);
+    results.push(result);
+    if (result.outcome === 'DISPATCHED') dispatches++;
+    if (maximum === 1) return { results, stop_reason: 'RUN_ONCE' };
+    if (result.outcome !== 'DISPATCHED') return { results, stop_reason: 'OUTCOME_STOP' };
+    if (dispatches >= maximum) return { results, stop_reason: 'MAX_DISPATCHES' };
+    if (!options.waitForEvent)
+      throw new Error('Event mode requires an explicit deterministic event source.');
+    const controller = new AbortController();
+    let timedOut = false;
+    let resolveIdle!: () => void;
+    const idlePromise = new Promise<void>((resolve) => (resolveIdle = resolve));
+    const idle = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      resolveIdle();
+    }, options.idleTimeoutMs ?? 30_000);
+    try {
+      await Promise.race([options.waitForEvent(controller.signal), idlePromise]);
+      if (timedOut) return { results, stop_reason: 'IDLE_TIMEOUT' };
+    } catch (error) {
+      if (timedOut) return { results, stop_reason: 'IDLE_TIMEOUT' };
+      throw error;
+    } finally {
+      clearTimeout(idle);
+    }
+  }
+  return { results, stop_reason: 'MAX_DISPATCHES' };
 }
 
 async function exists(file: string): Promise<boolean> {
@@ -779,6 +1329,23 @@ export async function runnerStatus(
   const events = await new RunnerLedger(path.join(stateDirectory, `${taskId}.jsonl`)).read();
   const last = events.at(-1);
   const lastDispatch = [...events].reverse().find((event) => event.type === 'dispatch_result');
+  const lastTransition = [...events]
+    .reverse()
+    .find((event) => event.type === 'observed_transition');
+  const lastSuccess = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        ['observed_transition', 'dispatch_result'].includes(event.type) &&
+        event.outcome !== 'FAILED',
+    );
+  const lastBlocker = [...events]
+    .reverse()
+    .find((event) => ['failure', 'recovery', 'circuit_break'].includes(event.type));
+  const approval = [...events].reverse().find((event) => event.type === 'approval_request');
+  const leaseFile = path.join(stateDirectory, 'leases', `${taskId}.lock`);
+  let lease: Lease | null = null;
+  if (await exists(leaseFile)) lease = JSON.parse(await fs.readFile(leaseFile, 'utf8')) as Lease;
   return {
     schema_version: RUNNER_SCHEMA_VERSION,
     task: task.id,
@@ -786,11 +1353,25 @@ export async function runnerStatus(
     owner: task.owner,
     last_action: last?.type ?? null,
     last_outcome: last?.outcome ?? null,
-    pending_approval: last?.type === 'approval_request',
-    lease: (await exists(path.join(stateDirectory, 'leases', `${taskId}.lock`))) ? 'held' : 'free',
+    last_transition: lastTransition?.details ?? null,
+    last_successful_action: lastSuccess?.type ?? null,
+    pending_approval: approval
+      ? { classification: approval.details.classification, dispatch_id: approval.dispatch_id }
+      : null,
+    blocker: lastBlocker ? { outcome: lastBlocker.outcome, details: lastBlocker.details } : null,
+    lease: lease
+      ? {
+          status: 'held',
+          run_id: lease.run_id,
+          heartbeat_at: lease.heartbeat_at,
+          expires_at: lease.expires_at,
+        }
+      : { status: 'free' },
     dispatch_count: events.filter((event) => event.type === 'dispatch_start').length,
-    retry_count: 0,
-    circuit: events.some((event) => event.type === 'circuit_break') ? 'open' : 'closed',
+    retry_count: events.filter((event) => event.type === 'retry').length,
+    circuit: [...events].reverse().find((event) => event.type === 'circuit_break')
+      ? 'open'
+      : 'closed',
     model: (lastDispatch?.details.model as string | undefined) ?? 'unknown',
     input_tokens: (lastDispatch?.details.input_tokens as number | undefined) ?? 'unknown',
     output_tokens: (lastDispatch?.details.output_tokens as number | undefined) ?? 'unknown',

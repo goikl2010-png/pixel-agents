@@ -13,10 +13,20 @@
     "workflow_state": { "enum": ["BACKLOG", "DEVELOPMENT", "READY_FOR_QA", "QA", "CHANGES_REQUIRED", "QA_RETEST", "READY_FOR_REVIEW", "REVIEW", "APPROVED", "COMPLETED", "BLOCKED"] },
     "requested_action": { "type": "string", "minLength": 1 },
     "reason": { "type": "string", "minLength": 1 },
-    "affected_files_resources": { "type": "array", "items": { "type": "string" } },
-    "branch_pr": { "type": "object", "required": ["repository", "branch", "pr", "head"] },
+    "affected_files_resources": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "branch_pr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "branch", "pr", "head"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "pr": { "type": ["integer", "null"], "minimum": 1 },
+        "head": { "type": "string", "minLength": 1 }
+      }
+    },
     "external_effects": { "type": "array", "items": { "type": "string" } },
-    "risk_approval_class": { "enum": ["RED", "UNKNOWN"] },
+    "risk_approval_class": { "enum": ["YELLOW", "RED", "UNKNOWN"] },
     "recommended_next_action": { "type": "string", "minLength": 1 },
     "evidence": { "type": "array", "items": { "type": "string" } },
     "run_id": { "type": "string", "minLength": 1 },

@@ -24,7 +24,12 @@ import {
   loadAllPets,
 } from './assetReload.js';
 import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.js';
-import { FakeAgentDispatcher, runCompanyOnce, runnerStatus } from './companyRunner.js';
+import {
+  FakeAgentDispatcher,
+  GhCliGitHubFactResolver,
+  runCompanyOnce,
+  runnerStatus,
+} from './companyRunner.js';
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
@@ -282,6 +287,16 @@ async function main(): Promise<void> {
           stateDirectory: args.runnerStateDirectory,
           dispatcher: new FakeAgentDispatcher(),
           dryRun: args.runnerDryRun,
+          githubResolver: new GhCliGitHubFactResolver({
+            credentialEnvironmentVariable: 'GH_TOKEN',
+          }),
+          approvalSchemaPath: path.resolve(
+            __dirname,
+            '..',
+            'docs',
+            'schemas',
+            'company-runner-approval-v1.schema.json',
+          ),
         });
     console.log(JSON.stringify(result, null, 2));
     return;
