@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
-import { tmpdir } from 'os';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'fs/promises';
+import { hostname, tmpdir } from 'os';
 import * as path from 'path';
 import { afterEach, expect, it } from 'vitest';
 
@@ -11,14 +11,18 @@ import {
   FakeAgentDispatcher,
   GhCliGitHubFactResolver,
   type GitHubFactResolver,
+  isLegalRunnerTransition,
   readRunnerTask,
+  reconcileRunnerFacts,
   runCompany,
   runCompanyOnce,
   RunnerLedger,
   runnerStatus,
+  spawnGovernedProcess,
   TaskLease,
   TransientPrelaunchError,
   validateApprovalPackage,
+  validateApprovalPackageSchema,
 } from '../src/companyRunner.js';
 import { LIFECYCLE_STATES, storageForLifecycleState } from '../src/handoffTransitionPlanner.js';
 
@@ -51,6 +55,10 @@ const githubResolver: GitHubFactResolver = { resolve: async () => githubFacts };
 const approvalSchemaPath = path.resolve(
   __dirname,
   '../../docs/schemas/company-runner-approval-v1.schema.json',
+);
+const codexOutputSchemaPath = path.resolve(
+  __dirname,
+  '../../docs/schemas/company-runner-codex-output-v1.schema.json',
 );
 async function fixture(state = 'DEVELOPMENT', owner: string = 'Nova', resume = 'None') {
   const root = await mkdtemp(path.join(tmpdir(), 'runner-v1-'));
@@ -378,6 +386,7 @@ it('rejects Codex substitution and version drift before launch', async () => {
     new CodexAgentDispatcher({
       executable: 'other',
       allowedExecutable: 'codex',
+      outputSchemaPath: codexOutputSchemaPath,
       workingRoot: path.resolve('.'),
       approvedWorkingRoot: path.resolve('.'),
       timeoutMs: 10,
@@ -390,6 +399,7 @@ it('rejects Codex substitution and version drift before launch', async () => {
     new CodexAgentDispatcher({
       executable: 'codex',
       allowedExecutable: 'codex',
+      outputSchemaPath: codexOutputSchemaPath,
       workingRoot: path.resolve('.'),
       approvedWorkingRoot: path.resolve('.'),
       timeoutMs: 10,
@@ -476,8 +486,9 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
   const dispatcher = new CodexAgentDispatcher({
     executable: 'codex',
     allowedExecutable: 'codex',
+    outputSchemaPath: codexOutputSchemaPath,
     workingRoot: path.resolve('.'),
-    approvedWorkingRoot: path.resolve('.'),
+    approvedWorkingRoot: path.resolve('..'),
     timeoutMs: 10,
     credentialEnvironmentVariable: 'GH_TOKEN',
     parentEnvironment: { GH_TOKEN: sentinel, PATH: 'safe-path' },
@@ -485,7 +496,8 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
       probeEnvironment = environment;
       return 'codex-cli 0.148.0';
     },
-    capabilityProbe: async () => 'exec --json --output-schema --cd --sandbox',
+    capabilityProbe: async () =>
+      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE> --ask-for-approval <APPROVAL_POLICY>',
     spawnProcess: async (_executable, args, _cwd, _timeout, _signal, environment) => {
       capturedArgs = args;
       capturedEnvironment = environment;
@@ -496,6 +508,8 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
         inputTokens: 0,
         outputTokens: 0,
         launched: true,
+        output:
+          '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"outcome\\":\\"completed\\"}"}}\n',
       };
     },
   });
@@ -523,6 +537,7 @@ it('refuses absent credential before probe or child launch', async () => {
   const dispatcher = new CodexAgentDispatcher({
     executable: 'codex',
     allowedExecutable: 'codex',
+    outputSchemaPath: codexOutputSchemaPath,
     workingRoot: path.resolve('.'),
     approvedWorkingRoot: path.resolve('.'),
     timeoutMs: 10,
@@ -554,3 +569,447 @@ it('refuses absent credential before probe or child launch', async () => {
   expect(probes).toBe(0);
   expect(launches).toBe(0);
 });
+
+it('enforces every checked-in approval schema constraint and fails closed on schema drift', async () => {
+  const sha = `sha256:${'a'.repeat(64)}`;
+  const valid = {
+    schema_version: '1',
+    request_id: sha,
+    created_at: '2026-08-20T00:00:00.000Z',
+    agent: 'Nova',
+    task: { id: 'TASK-16', path: 'tasks/active/task.md', fingerprint: sha },
+    workflow_state: 'DEVELOPMENT',
+    requested_action: 'DISPATCH_ROLE',
+    reason: 'reason',
+    affected_files_resources: ['one'],
+    branch_pr: { repository: 'owner/repo', branch: 'task/x', pr: 23, head: 'a'.repeat(40) },
+    external_effects: [],
+    risk_approval_class: 'YELLOW',
+    recommended_next_action: 'ask',
+    evidence: [],
+    run_id: 'run',
+    dispatch_id: sha,
+  };
+  await expect(
+    validateApprovalPackageSchema(valid as never, approvalSchemaPath),
+  ).resolves.toBeUndefined();
+  const invalid = [
+    { ...valid, extra: true },
+    { ...valid, request_id: 'bad' },
+    { ...valid, created_at: 'bad' },
+    { ...valid, agent: 'Unknown' },
+    { ...valid, task: { ...valid.task, id: 'bad' } },
+    { ...valid, task: { ...valid.task, extra: true } },
+    { ...valid, affected_files_resources: [] },
+    { ...valid, affected_files_resources: ['one', 'one'] },
+    { ...valid, affected_files_resources: [1] },
+    { ...valid, branch_pr: { ...valid.branch_pr, pr: 0 } },
+    { ...valid, branch_pr: { ...valid.branch_pr, extra: true } },
+    { ...valid, reason: '' },
+    { ...valid, dispatch_id: 'bad' },
+  ];
+  for (const candidate of invalid)
+    await expect(
+      validateApprovalPackageSchema(candidate as never, approvalSchemaPath),
+    ).rejects.toThrow('checked-in schema');
+  const root = await mkdtemp(path.join(tmpdir(), 'runner-schema-'));
+  roots.push(root);
+  const corrupt = path.join(root, 'schema.json');
+  await writeFile(corrupt, '{"type":"object","unsupported":true}');
+  await expect(validateApprovalPackageSchema(valid as never, corrupt)).rejects.toThrow(
+    'Unsupported',
+  );
+  await writeFile(corrupt, '{bad');
+  await expect(validateApprovalPackageSchema(valid as never, corrupt)).rejects.toThrow('malformed');
+});
+
+it.each([
+  '--json',
+  '--output-schema <FILE>',
+  '--cd <DIR>',
+  '--sandbox <SANDBOX_MODE>',
+  '--ask-for-approval <APPROVAL_POLICY>',
+])('refuses Codex capability drift for %s before governed launch', async (missing) => {
+  let launches = 0;
+  const all = [
+    '--json',
+    '--output-schema <FILE>',
+    '--cd <DIR>',
+    '--sandbox <SANDBOX_MODE>',
+    '--ask-for-approval <APPROVAL_POLICY>',
+  ];
+  const dispatcher = new CodexAgentDispatcher({
+    executable: 'codex',
+    allowedExecutable: 'codex',
+    outputSchemaPath: codexOutputSchemaPath,
+    workingRoot: path.resolve('.'),
+    approvedWorkingRoot: path.resolve('..'),
+    timeoutMs: 10,
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    parentEnvironment: { GH_TOKEN: 'fake' },
+    versionProbe: async () => 'codex-cli 0.148.0',
+    capabilityProbe: async () => all.filter((flag) => flag !== missing).join(' '),
+    spawnProcess: async () => {
+      launches++;
+      throw new Error('must not launch');
+    },
+  });
+  await expect(
+    dispatcher.dispatch(
+      {
+        schema_version: '1',
+        task: { id: 'TASK-016', path: 'x', fingerprint: 'x' },
+        role: 'Nova',
+        state: 'DEVELOPMENT',
+        dispatch_id: 'x',
+        evidence: [],
+        instruction: 'x',
+      },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('missing');
+  expect(launches).toBe(0);
+});
+
+it.each([
+  '',
+  'not-json\n',
+  '{"type":"turn.completed"}\n',
+  '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"outcome\\":\\"unknown\\"}"}}\n',
+  '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"outcome\\":\\"completed\\",\\"extra\\":true}"}}\n',
+])('rejects malformed or schema-invalid Codex output %j', async (output) => {
+  const dispatcher = new CodexAgentDispatcher({
+    executable: 'codex',
+    allowedExecutable: 'codex',
+    outputSchemaPath: codexOutputSchemaPath,
+    workingRoot: path.resolve('.'),
+    approvedWorkingRoot: path.resolve('..'),
+    timeoutMs: 10,
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    parentEnvironment: { GH_TOKEN: 'fake' },
+    versionProbe: async () => 'codex-cli 0.148.0',
+    capabilityProbe: async () =>
+      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE> --ask-for-approval <APPROVAL_POLICY>',
+    spawnProcess: async (_e, args) => {
+      expect(args).toEqual([
+        'exec',
+        '--json',
+        '--sandbox',
+        'workspace-write',
+        '--ask-for-approval',
+        'on-request',
+        '--cd',
+        path.resolve('.'),
+        '--output-schema',
+        codexOutputSchemaPath,
+        expect.any(String),
+      ]);
+      return {
+        exitCode: 0,
+        timedOut: false,
+        model: 'fake',
+        inputTokens: 0,
+        outputTokens: 0,
+        launched: true,
+        output,
+      };
+    },
+  });
+  await expect(
+    dispatcher.dispatch(
+      {
+        schema_version: '1',
+        task: { id: 'TASK-016', path: 'x', fingerprint: 'x' },
+        role: 'Nova',
+        state: 'DEVELOPMENT',
+        dispatch_id: 'x',
+        evidence: [],
+        instruction: 'x',
+      },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow(/JSONL|output schema/);
+});
+
+it('accepts a transition only with unique preceding role-owned current-head evidence', async () => {
+  const { root, task, stateDir } = await fixture();
+  const dispatcher = new FakeAgentDispatcher();
+  dispatcher.dispatch = async (packet) => {
+    dispatcher.calls.push(packet);
+    const evidence = 'documentation/qa/nova-handoff.md';
+    await writeFile(
+      path.join(root, evidence),
+      `Nova\nDEVELOPMENT to READY_FOR_QA\n${githubFacts.head}\n`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const next = (await readFile(task, 'utf8'))
+      .replace('**Owner:** Nova', '**Owner:** Pixel')
+      .replace('**Current state:** DEVELOPMENT', '**Current state:** READY_FOR_QA')
+      .concat(
+        `- **New evidence:** \`${evidence}\`\n| now | Nova | Pixel | \`DEVELOPMENT\` to \`READY_FOR_QA\` | ${evidence} | retest |\n`,
+      );
+    const destination = path.join(root, 'tasks', 'review', 'task.md');
+    await writeFile(task, next);
+    await rename(task, destination);
+    return {
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: true,
+    };
+  };
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher,
+      githubResolver,
+    }),
+  ).resolves.toMatchObject({ outcome: 'DISPATCHED' });
+  expect(
+    (await new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl')).read()).some(
+      (event) => event.type === 'observed_transition',
+    ),
+  ).toBe(true);
+});
+
+it('refuses a transition supported only by historical evidence', async () => {
+  const { root, task, stateDir } = await fixture();
+  const dispatcher = new FakeAgentDispatcher();
+  dispatcher.dispatch = async () => {
+    const next = (await readFile(task, 'utf8'))
+      .replace('**Owner:** Nova', '**Owner:** Pixel')
+      .replace('**Current state:** DEVELOPMENT', '**Current state:** READY_FOR_QA');
+    await writeFile(task, next);
+    await rename(task, path.join(root, 'tasks', 'review', 'task.md'));
+    return {
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: true,
+    };
+  };
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher,
+      githubResolver,
+    }),
+  ).rejects.toThrow('newly linked evidence');
+});
+
+it.each([
+  ['terminal', 'COMPLETED', 'Alex', undefined],
+  ['stop', 'DEVELOPMENT', 'Nova', 'stop'],
+] as const)(
+  'serializes concurrent %s audit writes into one valid chain',
+  async (_name, state, owner, stop) => {
+    const { root, stateDir } = await fixture(state, owner);
+    const stopFile = stop ? path.join(root, 'STOP') : undefined;
+    if (stopFile) await writeFile(stopFile, 'stop');
+    await Promise.all(
+      [0, 1, 2].map(() =>
+        runCompanyOnce({
+          companyRoot: root,
+          taskId: 'TASK-016',
+          stateDirectory: stateDir,
+          dispatcher: new FakeAgentDispatcher(),
+          githubResolver,
+          stopFile,
+        }),
+      ),
+    );
+    const events = await new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl')).read();
+    expect(events.length).toBeGreaterThan(0);
+  },
+);
+
+it('recovers only an expired dead-owner lease and preserves a live owner', async () => {
+  const { root, stateDir } = await fixture();
+  const decision = decideRunnerAction(await readRunnerTask(root, 'TASK-016'));
+  const file = path.join(stateDir, 'leases', 'TASK-016.lock');
+  await mkdir(path.dirname(file), { recursive: true });
+  const lease = (pid: number, expires: string) => ({
+    task_id: 'TASK-016',
+    run_id: 'old',
+    dispatch_id: 'old',
+    pid,
+    host: hostname(),
+    acquired_at: expires,
+    heartbeat_at: expires,
+    expires_at: expires,
+    state_fingerprint: 'old',
+  });
+  const expired = new Date(Date.now() - 1000).toISOString();
+  await writeFile(file, JSON.stringify(lease(2147483647, expired)));
+  const recovered = new TaskLease(file, 1000);
+  expect(await recovered.acquire(decision, 'new')).toBe('recovered');
+  await recovered.release('new');
+  await writeFile(file, JSON.stringify(lease(process.pid, expired)));
+  expect(await new TaskLease(file, 1000).acquire(decision, 'other')).toBe('contended');
+});
+
+it.each(['dispatch_intent', 'dispatch_start'])(
+  'restart refuses ambiguous %s crash evidence without redispatch',
+  async (type) => {
+    const { root, stateDir } = await fixture();
+    const task = await readRunnerTask(root, 'TASK-016');
+    const decision = decideRunnerAction(
+      task,
+      await reconcileRunnerFacts(root, task, githubResolver),
+    );
+    await new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl')).append({
+      type,
+      run_id: 'crashed',
+      dispatch_id: decision.dispatch_id,
+      task_fingerprint: decision.state_fingerprint,
+      outcome: 'PERSISTED',
+      details: {},
+    });
+    const fake = new FakeAgentDispatcher();
+    const result = await runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher: fake,
+      githubResolver,
+    });
+    expect(result.outcome).toBe('RECOVERY_REQUIRED');
+    expect(fake.calls).toHaveLength(0);
+  },
+);
+
+it('opens the persisted circuit after restart and performs zero dispatch', async () => {
+  const { root, stateDir } = await fixture();
+  const ledger = new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl'));
+  for (let index = 0; index < 3; index++)
+    await ledger.append({
+      type: 'failure',
+      run_id: `old-${index}`,
+      dispatch_id: `old-${index}`,
+      task_fingerprint: 'old',
+      outcome: 'FAILED',
+      details: {},
+    });
+  const fake = new FakeAgentDispatcher();
+  const result = await runCompanyOnce({
+    companyRoot: root,
+    taskId: 'TASK-016',
+    stateDirectory: stateDir,
+    dispatcher: fake,
+    githubResolver,
+  });
+  expect(result.outcome).toBe('FAILED');
+  expect(fake.calls).toHaveLength(0);
+  expect((await runnerStatus(root, 'TASK-016', stateDir)).circuit).toBe('open');
+});
+
+it('fails closed when heartbeat persistence is lost during dispatch', async () => {
+  const { root, stateDir } = await fixture();
+  const dispatcher = new FakeAgentDispatcher();
+  dispatcher.dispatch = async () => {
+    await rm(path.join(stateDir, 'leases', 'TASK-016.lock'));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return {
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: true,
+    };
+  };
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher,
+      githubResolver,
+      heartbeatMs: 5,
+    }),
+  ).rejects.toThrow();
+});
+
+it('bounds idle event loss without polling or redispatch', async () => {
+  const { root, stateDir } = await fixture();
+  const fake = new FakeAgentDispatcher();
+  const result = await runCompany({
+    companyRoot: root,
+    taskId: 'TASK-016',
+    stateDirectory: stateDir,
+    dispatcher: fake,
+    githubResolver,
+    maxDispatches: 2,
+    idleTimeoutMs: 10,
+    waitForEvent: async () => new Promise(() => undefined),
+  });
+  expect(result.stop_reason).toBe('IDLE_TIMEOUT');
+  expect(fake.calls).toHaveLength(1);
+});
+
+it('terminates a real unresponsive child and proves it no longer survives', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'runner-child-'));
+  roots.push(root);
+  const pidFile = path.join(root, 'pid.txt');
+  const controller = new AbortController();
+  const work = spawnGovernedProcess(
+    process.execPath,
+    [
+      '-e',
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`,
+    ],
+    root,
+    5000,
+    controller.signal,
+    process.env,
+  );
+  while (!(await readFile(pidFile, 'utf8').catch(() => '')))
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  const pid = Number(await readFile(pidFile, 'utf8'));
+  controller.abort();
+  const result = await work;
+  expect(result.timedOut).toBe(true);
+  expect(() => process.kill(pid, 0)).toThrow();
+});
+
+it.each([
+  ['BACKLOG', 'DEVELOPMENT'],
+  ['BACKLOG', 'BLOCKED'],
+  ['DEVELOPMENT', 'READY_FOR_QA'],
+  ['DEVELOPMENT', 'BLOCKED'],
+  ['READY_FOR_QA', 'QA'],
+  ['READY_FOR_QA', 'BLOCKED'],
+  ['QA', 'READY_FOR_REVIEW'],
+  ['QA', 'CHANGES_REQUIRED'],
+  ['QA', 'BLOCKED'],
+  ['CHANGES_REQUIRED', 'QA_RETEST'],
+  ['CHANGES_REQUIRED', 'BLOCKED'],
+  ['QA_RETEST', 'READY_FOR_REVIEW'],
+  ['QA_RETEST', 'CHANGES_REQUIRED'],
+  ['QA_RETEST', 'BLOCKED'],
+  ['READY_FOR_REVIEW', 'REVIEW'],
+  ['READY_FOR_REVIEW', 'BLOCKED'],
+  ['REVIEW', 'APPROVED'],
+  ['REVIEW', 'CHANGES_REQUIRED'],
+  ['REVIEW', 'BLOCKED'],
+  ['APPROVED', 'COMPLETED'],
+  ['APPROVED', 'BLOCKED'],
+  ['BLOCKED', 'QA_RETEST'],
+] as const)(
+  'recognizes governed transition %s -> %s without adding a competing lifecycle',
+  (from, to) => {
+    const before = {
+      state: from,
+      ...(from === 'BLOCKED' ? { resumeState: 'QA_RETEST' } : {}),
+    } as never;
+    expect(isLegalRunnerTransition(before, { state: to } as never)).toBe(true);
+  },
+);

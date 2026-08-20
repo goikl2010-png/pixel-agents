@@ -214,6 +214,7 @@ export interface DispatchResult {
   inputTokens: number | 'unknown';
   outputTokens: number | 'unknown';
   launched: boolean;
+  output?: string;
 }
 
 export interface AgentDispatcher {
@@ -243,12 +244,13 @@ export interface CodexDispatcherOptions {
   workingRoot: string;
   approvedWorkingRoot?: string;
   allowedExecutable: string;
+  outputSchemaPath: string;
   timeoutMs: number;
   credentialEnvironmentVariable: 'GH_TOKEN' | 'GITHUB_TOKEN';
   parentEnvironment?: NodeJS.ProcessEnv;
   versionProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   capabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
-  spawnProcess?: typeof spawnDirect;
+  spawnProcess?: typeof spawnGovernedProcess;
 }
 
 const FORBIDDEN_ARGUMENT =
@@ -289,16 +291,22 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       executable,
       probeEnvironment,
     );
-    for (const capability of ['exec', '--json', '--output-schema', '--cd', '--sandbox']) {
-      if (!capabilities.includes(capability))
+    for (const capability of [
+      '--json',
+      '--output-schema <FILE>',
+      '--cd <DIR>',
+      '--sandbox <SANDBOX_MODE>',
+      '--ask-for-approval <APPROVAL_POLICY>',
+    ]) {
+      if (!capabilities.split(/\r?\n/).some((line) => line.trim().includes(capability)))
         throw new Error(`Unsupported Codex CLI capability surface: missing ${capability}.`);
     }
-    const outputSchema = JSON.stringify({
-      type: 'object',
-      additionalProperties: false,
-      required: ['outcome'],
-      properties: { outcome: { enum: ['completed', 'blocked', 'failed'] } },
-    });
+    const outputSchema = await fs.realpath(this.options.outputSchemaPath);
+    const schemaRelative = path.relative(approved, outputSchema);
+    if (schemaRelative.startsWith('..') || path.isAbsolute(schemaRelative))
+      throw new Error('Codex output schema escapes the approved working root.');
+    const schema = JSON.parse(await fs.readFile(outputSchema, 'utf8')) as unknown;
+    validateJsonSchemaDefinition(schema);
     const prompt = JSON.stringify(packet);
     const args = [
       'exec',
@@ -315,7 +323,7 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     ];
     if (args.some((argument) => FORBIDDEN_ARGUMENT.test(argument)))
       throw new Error('Codex invocation contains a forbidden permission or bypass argument.');
-    return (this.options.spawnProcess ?? spawnDirect)(
+    const result = await (this.options.spawnProcess ?? spawnGovernedProcess)(
       executable,
       args,
       root,
@@ -323,6 +331,9 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       signal,
       childEnvironment,
     );
+    if (!result.output) throw new Error('Codex returned no JSONL output.');
+    validateCodexJsonlOutput(result.output);
+    return result;
   }
 }
 
@@ -479,7 +490,7 @@ async function runGhJson(
   });
 }
 
-async function spawnDirect(
+export async function spawnGovernedProcess(
   executable: string,
   args: string[],
   cwd: string,
@@ -489,6 +500,8 @@ async function spawnDirect(
 ): Promise<DispatchResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true });
+    let output = '';
+    child.stdout.on('data', (data: Buffer) => (output += data.toString('utf8')));
     let settled = false;
     let timedOut = false;
     const finish = (result: DispatchResult): void => {
@@ -516,9 +529,43 @@ async function spawnDirect(
         inputTokens: 'unknown',
         outputTokens: 'unknown',
         launched: true,
+        output,
       }),
     );
   });
+}
+
+function validateCodexJsonlOutput(output: string): void {
+  const lines = output.split(/\r?\n/).filter(Boolean);
+  if (lines.length === 0) throw new Error('Codex returned empty JSONL output.');
+  const records = lines.map((line) => {
+    try {
+      return JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      throw new Error('Codex returned malformed JSONL output.');
+    }
+  });
+  const messages = records.filter(
+    (record) =>
+      record.type === 'item.completed' &&
+      record.item &&
+      typeof record.item === 'object' &&
+      (record.item as Record<string, unknown>).type === 'agent_message',
+  );
+  if (messages.length !== 1)
+    throw new Error('Codex JSONL output lacks one unique final agent message.');
+  const text = (messages[0].item as Record<string, unknown>).text;
+  let final: Record<string, unknown>;
+  try {
+    final = JSON.parse(String(text)) as Record<string, unknown>;
+  } catch {
+    throw new Error('Codex final output is malformed JSON.');
+  }
+  if (
+    Object.keys(final).some((key) => key !== 'outcome') ||
+    !['completed', 'blocked', 'failed'].includes(String(final.outcome))
+  )
+    throw new Error('Codex final output failed the governed output schema.');
 }
 
 function sha256(value: string): string {
@@ -830,26 +877,155 @@ export async function validateApprovalPackageSchema(
   value: ApprovalPackage,
   schemaPath: string,
 ): Promise<void> {
-  let schema: {
-    required?: string[];
-    properties?: Record<string, unknown>;
-    additionalProperties?: boolean;
-  };
+  let schema: unknown;
   try {
-    schema = JSON.parse(await fs.readFile(schemaPath, 'utf8')) as typeof schema;
+    schema = JSON.parse(await fs.readFile(schemaPath, 'utf8')) as unknown;
   } catch {
     throw new Error('Approval package schema is missing, unreadable, or malformed.');
   }
-  const actualKeys = Object.keys(value).sort();
-  const required = [...(schema.required ?? [])].sort();
-  const declared = Object.keys(schema.properties ?? {}).sort();
+  validateJsonSchemaDefinition(schema);
+  const errors: string[] = [];
+  validateJsonSchemaValue(schema as JsonSchema, value, '$', errors);
+  if (errors.length) throw new Error(`Approval package failed checked-in schema: ${errors[0]}`);
+}
+
+type JsonSchema = Record<string, unknown>;
+const SCHEMA_KEYS = new Set([
+  '$schema',
+  'title',
+  'type',
+  'additionalProperties',
+  'required',
+  'properties',
+  'const',
+  'enum',
+  'pattern',
+  'format',
+  'minLength',
+  'minimum',
+  'minItems',
+  'uniqueItems',
+  'items',
+  'oneOf',
+]);
+
+function validateJsonSchemaDefinition(schema: unknown, at = '$'): asserts schema is JsonSchema {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema))
+    throw new Error(`Invalid JSON Schema at ${at}.`);
+  for (const key of Object.keys(schema))
+    if (!SCHEMA_KEYS.has(key)) throw new Error(`Unsupported JSON Schema keyword ${key} at ${at}.`);
+  const typed = schema as JsonSchema;
+  if (typed.type !== undefined) {
+    const types = Array.isArray(typed.type) ? typed.type : [typed.type];
+    if (
+      !types.every((type) =>
+        ['object', 'array', 'string', 'integer', 'number', 'null'].includes(String(type)),
+      )
+    )
+      throw new Error(`Invalid JSON Schema type at ${at}.`);
+  }
   if (
-    schema.additionalProperties !== false ||
-    JSON.stringify(required) !== JSON.stringify(actualKeys) ||
-    JSON.stringify(declared) !== JSON.stringify(actualKeys)
+    typed.required !== undefined &&
+    (!Array.isArray(typed.required) || !typed.required.every((item) => typeof item === 'string'))
   )
-    throw new Error('Approval package schema does not match the runtime contract.');
-  validateApprovalPackage(value);
+    throw new Error(`Invalid JSON Schema required list at ${at}.`);
+  if (typed.properties !== undefined) {
+    if (
+      !typed.properties ||
+      typeof typed.properties !== 'object' ||
+      Array.isArray(typed.properties)
+    )
+      throw new Error(`Invalid JSON Schema properties at ${at}.`);
+    for (const [key, child] of Object.entries(typed.properties))
+      validateJsonSchemaDefinition(child, `${at}.properties.${key}`);
+  }
+  if (typed.items !== undefined) validateJsonSchemaDefinition(typed.items, `${at}.items`);
+  if (typed.oneOf !== undefined) {
+    if (!Array.isArray(typed.oneOf) || typed.oneOf.length === 0)
+      throw new Error(`Invalid JSON Schema oneOf at ${at}.`);
+    typed.oneOf.forEach((child, index) =>
+      validateJsonSchemaDefinition(child, `${at}.oneOf[${index}]`),
+    );
+  }
+  if (typed.pattern !== undefined) {
+    try {
+      new RegExp(String(typed.pattern));
+    } catch {
+      throw new Error(`Invalid JSON Schema pattern at ${at}.`);
+    }
+  }
+}
+
+function validateJsonSchemaValue(
+  schema: JsonSchema,
+  value: unknown,
+  at: string,
+  errors: string[],
+): void {
+  if (schema.oneOf) {
+    const matches = (schema.oneOf as JsonSchema[]).filter((candidate) => {
+      const candidateErrors: string[] = [];
+      validateJsonSchemaValue(candidate, value, at, candidateErrors);
+      return candidateErrors.length === 0;
+    });
+    if (matches.length !== 1) errors.push(`${at} must match exactly one schema`);
+    return;
+  }
+  if (schema.const !== undefined && value !== schema.const) errors.push(`${at} must equal const`);
+  if (schema.enum && !(schema.enum as unknown[]).includes(value))
+    errors.push(`${at} is not in enum`);
+  const types =
+    schema.type === undefined ? [] : Array.isArray(schema.type) ? schema.type : [schema.type];
+  const actual =
+    value === null
+      ? 'null'
+      : Array.isArray(value)
+        ? 'array'
+        : Number.isInteger(value)
+          ? 'integer'
+          : typeof value;
+  if (
+    types.length &&
+    !types.includes(actual) &&
+    !(actual === 'integer' && types.includes('number'))
+  ) {
+    errors.push(`${at} has invalid type`);
+    return;
+  }
+  if (typeof value === 'string') {
+    if (schema.minLength !== undefined && value.length < Number(schema.minLength))
+      errors.push(`${at} is too short`);
+    if (schema.pattern !== undefined && !new RegExp(String(schema.pattern)).test(value))
+      errors.push(`${at} fails pattern`);
+    if (schema.format === 'date-time' && Number.isNaN(Date.parse(value)))
+      errors.push(`${at} is not date-time`);
+  }
+  if (typeof value === 'number' && schema.minimum !== undefined && value < Number(schema.minimum))
+    errors.push(`${at} is below minimum`);
+  if (Array.isArray(value)) {
+    if (schema.minItems !== undefined && value.length < Number(schema.minItems))
+      errors.push(`${at} has too few items`);
+    if (
+      schema.uniqueItems &&
+      new Set(value.map((item) => JSON.stringify(item))).size !== value.length
+    )
+      errors.push(`${at} has duplicate items`);
+    if (schema.items)
+      value.forEach((item, index) =>
+        validateJsonSchemaValue(schema.items as JsonSchema, item, `${at}[${index}]`, errors),
+      );
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>;
+    for (const required of (schema.required as string[] | undefined) ?? [])
+      if (!(required in object)) errors.push(`${at}.${required} is required`);
+    const properties = (schema.properties as Record<string, JsonSchema> | undefined) ?? {};
+    if (schema.additionalProperties === false)
+      for (const key of Object.keys(object))
+        if (!(key in properties)) errors.push(`${at}.${key} is additional`);
+    for (const [key, child] of Object.entries(properties))
+      if (key in object) validateJsonSchemaValue(child, object[key], `${at}.${key}`, errors);
+  }
 }
 
 interface LedgerEvent {
@@ -1006,6 +1182,23 @@ export class TaskLease {
     }
     await fs.rename(temporary, this.file);
   }
+  async bind(runId: string, decision: RunnerDecision): Promise<void> {
+    const lease = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
+    if (lease.run_id !== runId) throw new Error('Lease identity bind refused: owner mismatch.');
+    const bound = {
+      ...lease,
+      dispatch_id: decision.dispatch_id,
+      state_fingerprint: decision.state_fingerprint,
+    };
+    const temporary = `${this.file}.${runId}.bind`;
+    await fs.writeFile(temporary, JSON.stringify(bound), { flag: 'wx' });
+    const current = JSON.parse(await fs.readFile(this.file, 'utf8')) as Lease;
+    if (current.run_id !== runId) {
+      await fs.unlink(temporary).catch(() => undefined);
+      throw new Error('Lease ownership changed during identity bind.');
+    }
+    await fs.rename(temporary, this.file);
+  }
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -1056,6 +1249,42 @@ const LEGAL_NEXT: Readonly<Record<LifecycleState, readonly LifecycleState[]>> = 
   BLOCKED: [],
 };
 
+export function isLegalRunnerTransition(before: RunnerTask, after: RunnerTask): boolean {
+  return before.state === 'BLOCKED'
+    ? before.resumeState === after.state
+    : LEGAL_NEXT[before.state].includes(after.state);
+}
+
+async function verifyObservedTransition(
+  companyRoot: string,
+  before: RunnerTask,
+  after: RunnerTask,
+  facts: ReconciledFacts,
+): Promise<void> {
+  const expectedActor = before.owner;
+  const newlyLinked = facts.evidence.filter((item) => !before.evidence.includes(item.path));
+  if (newlyLinked.length !== 1)
+    throw new Error('Observed transition requires exactly one newly linked evidence record.');
+  const evidence = newlyLinked[0];
+  const taskStat = await fs.stat(after.path);
+  const evidenceStat = await fs.stat(path.resolve(companyRoot, evidence.path));
+  if (evidenceStat.mtimeMs > taskStat.mtimeMs)
+    throw new Error('Transition evidence was saved after the authoritative transition.');
+  const transition = `${before.state} to ${after.state}`;
+  if (!evidence.bytes.includes(expectedActor) || !evidence.bytes.includes(transition))
+    throw new Error('Transition evidence has the wrong role or transition type.');
+  if (facts.github && !evidence.bytes.includes(facts.github.head))
+    throw new Error('Transition evidence does not cover the current Pull Request head.');
+  const matchingRows = [...after.bytes.matchAll(/^\|[^\n]+\|/gm)].filter(
+    ([row]) =>
+      row.includes(expectedActor) &&
+      row.includes(`\`${before.state}\` to \`${after.state}\``) &&
+      row.includes(evidence.path),
+  );
+  if (matchingRows.length !== 1)
+    throw new Error('Authoritative task lacks one unique role-owned transition handoff row.');
+}
+
 export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const runId = randomUUID();
   const task = await readRunnerTask(options.companyRoot, options.taskId);
@@ -1070,14 +1299,6 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       outcome,
       details,
     });
-  if (options.stopFile && (await exists(options.stopFile))) {
-    await append('stop', 'STOPPED');
-    return { run_id: runId, outcome: 'STOPPED', decision };
-  }
-  if (task.state === 'COMPLETED') {
-    await append('decision', 'NO_ACTION_TERMINAL');
-    return { run_id: runId, outcome: 'NO_ACTION_TERMINAL', decision };
-  }
   const lease = new TaskLease(
     path.join(options.stateDirectory, 'leases', `${task.id}.lock`),
     options.leaseTtlMs ?? 30_000,
@@ -1101,8 +1322,18 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
   }
   await append(acquired === 'recovered' ? 'lease_recovery' : 'lease_acquire', acquired);
   try {
+    if (options.stopFile && (await exists(options.stopFile))) {
+      await append('stop', 'STOPPED');
+      return { run_id: runId, outcome: 'STOPPED', decision };
+    }
+    if (task.state === 'COMPLETED') {
+      await append('decision', 'NO_ACTION_TERMINAL');
+      return { run_id: runId, outcome: 'NO_ACTION_TERMINAL', decision };
+    }
     const facts = await reconcileRunnerFacts(options.companyRoot, task, options.githubResolver);
     decision = decideRunnerAction(task, facts);
+    await lease.bind(runId, decision);
+    await append('lease_identity', 'BOUND');
     const previous = await ledger.read();
     const unresolvedIntent = previous.some(
       (event) =>
@@ -1229,9 +1460,14 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
     const postTask = await readRunnerTask(options.companyRoot, options.taskId);
     let postOutcome = 'UNCHANGED';
     if (postTask.bytes !== task.bytes) {
-      if (!LEGAL_NEXT[task.state].includes(postTask.state))
+      if (!isLegalRunnerTransition(task, postTask))
         throw new Error(`Agent produced illegal transition ${task.state} -> ${postTask.state}.`);
-      await reconcileRunnerFacts(options.companyRoot, postTask, options.githubResolver);
+      const postFacts = await reconcileRunnerFacts(
+        options.companyRoot,
+        postTask,
+        options.githubResolver,
+      );
+      await verifyObservedTransition(options.companyRoot, task, postTask, postFacts);
       postOutcome = 'OBSERVED_TRANSITION';
       await append('observed_transition', postOutcome, {
         from: task.state,
@@ -1257,8 +1493,8 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
     }).catch(() => undefined);
     throw error;
   } finally {
-    await lease.release(runId);
     await append('lease_release', 'RELEASED');
+    await lease.release(runId);
   }
 }
 
