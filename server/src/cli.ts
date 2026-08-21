@@ -24,6 +24,12 @@ import {
   loadAllPets,
 } from './assetReload.js';
 import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.js';
+import {
+  FakeAgentDispatcher,
+  GhCliGitHubFactResolver,
+  runCompanyOnce,
+  runnerStatus,
+} from './companyRunner.js';
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
@@ -62,6 +68,11 @@ export interface CliArgs {
   handoffTimestamp?: string;
   handoffEvidence?: string;
   handoffNextAction?: string;
+  runnerTask?: string;
+  runnerStateDirectory?: string;
+  runnerDryRun?: boolean;
+  runnerStatus?: boolean;
+  runnerFake?: boolean;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -151,6 +162,18 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (argv[i] === '--handoff-next-action') {
       if (!argv[i + 1]) throw new CliArgsError('Missing value for --handoff-next-action.');
       args.handoffNextAction = argv[++i];
+    } else if (argv[i] === '--runner-task') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-task.');
+      args.runnerTask = argv[++i];
+    } else if (argv[i] === '--runner-state-directory') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-state-directory.');
+      args.runnerStateDirectory = argv[++i];
+    } else if (argv[i] === '--runner-dry-run') {
+      args.runnerDryRun = true;
+    } else if (argv[i] === '--runner-status') {
+      args.runnerStatus = true;
+    } else if (argv[i] === '--runner-fake') {
+      args.runnerFake = true;
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
@@ -171,6 +194,12 @@ Options:
   --handoff-actor <id> --handoff-recipient <id> --handoff-timestamp <text>
   --handoff-evidence <text> --handoff-next-action <text>
                          Required caller-supplied guarded execution inputs
+  --runner-task <TASK-ID> Run Company Runner V1 once for one explicit task
+  --runner-state-directory <path>
+                         Isolated append-only Runner evidence directory
+  --runner-dry-run       Compute decision without agent/task/GitHub mutation
+  --runner-status        Print machine-readable Runner status without dispatch
+  --runner-fake          Use deterministic fake adapter (test/rehearsal only)
   --help                Show this help message`);
       process.exit(0);
     }
@@ -232,6 +261,44 @@ async function main(): Promise<void> {
   if (hasExecutionOnlyInput && !args.executeHandoff) {
     console.error('[Pixel Agents] guarded execution inputs require --execute-handoff.');
     process.exitCode = 1;
+    return;
+  }
+
+  if (args.runnerTask) {
+    if (!args.companyTasksRoot || !args.runnerStateDirectory) {
+      console.error(
+        '[Pixel Agents] --runner-task requires --company-tasks-root and --runner-state-directory.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (!args.runnerStatus && !args.runnerDryRun && !args.runnerFake) {
+      console.error(
+        '[Pixel Agents] live Runner dispatch requires an explicitly configured adapter; use --runner-dry-run or --runner-fake for safe operation.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const result = args.runnerStatus
+      ? await runnerStatus(args.companyTasksRoot, args.runnerTask, args.runnerStateDirectory)
+      : await runCompanyOnce({
+          companyRoot: args.companyTasksRoot,
+          taskId: args.runnerTask,
+          stateDirectory: args.runnerStateDirectory,
+          dispatcher: new FakeAgentDispatcher(),
+          dryRun: args.runnerDryRun,
+          githubResolver: new GhCliGitHubFactResolver({
+            credentialEnvironmentVariable: 'GH_TOKEN',
+          }),
+          approvalSchemaPath: path.resolve(
+            __dirname,
+            '..',
+            'docs',
+            'schemas',
+            'company-runner-approval-v1.schema.json',
+          ),
+        });
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 

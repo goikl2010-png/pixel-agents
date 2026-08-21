@@ -64,6 +64,24 @@ function runCli(args: string[]): Promise<{ code: number | null; stdout: string; 
 }
 
 describe('parseArgs', () => {
+  it('parses the explicit safe Company Runner V1 surface', () => {
+    expect(
+      parseArgs([
+        '--runner-task',
+        'TASK-016',
+        '--company-tasks-root',
+        'C:\\AI-Company',
+        '--runner-state-directory',
+        'C:\\temp\\runner',
+        '--runner-dry-run',
+      ]),
+    ).toMatchObject({
+      runnerTask: 'TASK-016',
+      companyTasksRoot: 'C:\\AI-Company',
+      runnerStateDirectory: 'C:\\temp\\runner',
+      runnerDryRun: true,
+    });
+  });
   it('parses read-only actionable-task discovery arguments', () => {
     expect(
       parseArgs(['--discover-task', 'Nova', '--company-tasks-root', 'C:\\AI-Company']),
