@@ -1070,4 +1070,3 @@ it.each([
     expect(isLegalRunnerTransition(before, { state: to } as never)).toBe(true);
   },
 );
-
