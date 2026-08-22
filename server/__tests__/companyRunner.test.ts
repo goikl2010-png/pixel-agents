@@ -496,8 +496,9 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
       probeEnvironment = environment;
       return 'codex-cli 0.148.0';
     },
+    globalCapabilityProbe: async () => '--ask-for-approval <APPROVAL_POLICY>',
     capabilityProbe: async () =>
-      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE> --ask-for-approval <APPROVAL_POLICY>',
+      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE>',
     spawnProcess: async (_executable, args, _cwd, _timeout, _signal, environment) => {
       capturedArgs = args;
       capturedEnvironment = environment;
@@ -623,21 +624,48 @@ it('enforces every checked-in approval schema constraint and fails closed on sch
   await expect(validateApprovalPackageSchema(valid as never, corrupt)).rejects.toThrow('malformed');
 });
 
-it.each([
-  '--json',
-  '--output-schema <FILE>',
-  '--cd <DIR>',
-  '--sandbox <SANDBOX_MODE>',
-  '--ask-for-approval <APPROVAL_POLICY>',
-])('refuses Codex capability drift for %s before governed launch', async (missing) => {
+it.each(['--json', '--output-schema <FILE>', '--cd <DIR>', '--sandbox <SANDBOX_MODE>'])(
+  'refuses Codex exec capability drift for %s before governed launch',
+  async (missing) => {
+    let launches = 0;
+    const all = ['--json', '--output-schema <FILE>', '--cd <DIR>', '--sandbox <SANDBOX_MODE>'];
+    const dispatcher = new CodexAgentDispatcher({
+      executable: 'codex',
+      allowedExecutable: 'codex',
+      outputSchemaPath: codexOutputSchemaPath,
+      workingRoot: path.resolve('.'),
+      approvedWorkingRoot: path.resolve('..'),
+      timeoutMs: 10,
+      credentialEnvironmentVariable: 'GH_TOKEN',
+      parentEnvironment: { GH_TOKEN: 'fake' },
+      versionProbe: async () => 'codex-cli 0.148.0',
+      globalCapabilityProbe: async () => '--ask-for-approval <APPROVAL_POLICY>',
+      capabilityProbe: async () => all.filter((flag) => flag !== missing).join(' '),
+      spawnProcess: async () => {
+        launches++;
+        throw new Error('must not launch');
+      },
+    });
+    await expect(
+      dispatcher.dispatch(
+        {
+          schema_version: '1',
+          task: { id: 'TASK-016', path: 'x', fingerprint: 'x' },
+          role: 'Nova',
+          state: 'DEVELOPMENT',
+          dispatch_id: 'x',
+          evidence: [],
+          instruction: 'x',
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('missing');
+    expect(launches).toBe(0);
+  },
+);
+
+it('refuses missing global approval capability before governed launch', async () => {
   let launches = 0;
-  const all = [
-    '--json',
-    '--output-schema <FILE>',
-    '--cd <DIR>',
-    '--sandbox <SANDBOX_MODE>',
-    '--ask-for-approval <APPROVAL_POLICY>',
-  ];
   const dispatcher = new CodexAgentDispatcher({
     executable: 'codex',
     allowedExecutable: 'codex',
@@ -647,8 +675,10 @@ it.each([
     timeoutMs: 10,
     credentialEnvironmentVariable: 'GH_TOKEN',
     parentEnvironment: { GH_TOKEN: 'fake' },
-    versionProbe: async () => 'codex-cli 0.148.0',
-    capabilityProbe: async () => all.filter((flag) => flag !== missing).join(' '),
+    versionProbe: async () => 'codex-cli 0.149.0',
+    globalCapabilityProbe: async () => '--approve-for-me',
+    capabilityProbe: async () =>
+      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE>',
     spawnProcess: async () => {
       launches++;
       throw new Error('must not launch');
@@ -658,7 +688,7 @@ it.each([
     dispatcher.dispatch(
       {
         schema_version: '1',
-        task: { id: 'TASK-016', path: 'x', fingerprint: 'x' },
+        task: { id: 'TASK-021', path: 'x', fingerprint: 'x' },
         role: 'Nova',
         state: 'DEVELOPMENT',
         dispatch_id: 'x',
@@ -667,7 +697,7 @@ it.each([
       },
       new AbortController().signal,
     ),
-  ).rejects.toThrow('missing');
+  ).rejects.toThrow('global capability surface');
   expect(launches).toBe(0);
 });
 
@@ -688,16 +718,17 @@ it.each([
     credentialEnvironmentVariable: 'GH_TOKEN',
     parentEnvironment: { GH_TOKEN: 'fake' },
     versionProbe: async () => 'codex-cli 0.148.0',
+    globalCapabilityProbe: async () => '--ask-for-approval <APPROVAL_POLICY>',
     capabilityProbe: async () =>
-      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE> --ask-for-approval <APPROVAL_POLICY>',
+      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE>',
     spawnProcess: async (_e, args) => {
       expect(args).toEqual([
+        '--ask-for-approval',
+        'on-request',
         'exec',
         '--json',
         '--sandbox',
         'workspace-write',
-        '--ask-for-approval',
-        'on-request',
         '--cd',
         path.resolve('.'),
         '--output-schema',
@@ -1039,3 +1070,4 @@ it.each([
     expect(isLegalRunnerTransition(before, { state: to } as never)).toBe(true);
   },
 );
+

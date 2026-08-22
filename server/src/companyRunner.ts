@@ -249,6 +249,7 @@ export interface CodexDispatcherOptions {
   credentialEnvironmentVariable: 'GH_TOKEN' | 'GITHUB_TOKEN';
   parentEnvironment?: NodeJS.ProcessEnv;
   versionProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
+  globalCapabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   capabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   spawnProcess?: typeof spawnGovernedProcess;
 }
@@ -287,7 +288,18 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     );
     if (!/codex-cli\s+0\.(?:1(?:4[8-9]|[5-9]\d)|[2-9]\d\d)\./i.test(version))
       throw new Error(`Unsupported Codex CLI capability version: ${version}`);
-    const capabilities = await (this.options.capabilityProbe ?? probeCodexCapabilities)(
+    const globalCapabilities = await (
+      this.options.globalCapabilityProbe ?? probeCodexGlobalCapabilities
+    )(executable, probeEnvironment);
+    if (
+      !globalCapabilities
+        .split(/\r?\n/)
+        .some((line) => line.trim().includes('--ask-for-approval <APPROVAL_POLICY>'))
+    )
+      throw new Error(
+        'Unsupported Codex CLI global capability surface: missing --ask-for-approval <APPROVAL_POLICY>.',
+      );
+    const execCapabilities = await (this.options.capabilityProbe ?? probeCodexCapabilities)(
       executable,
       probeEnvironment,
     );
@@ -296,10 +308,9 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       '--output-schema <FILE>',
       '--cd <DIR>',
       '--sandbox <SANDBOX_MODE>',
-      '--ask-for-approval <APPROVAL_POLICY>',
     ]) {
-      if (!capabilities.split(/\r?\n/).some((line) => line.trim().includes(capability)))
-        throw new Error(`Unsupported Codex CLI capability surface: missing ${capability}.`);
+      if (!execCapabilities.split(/\r?\n/).some((line) => line.trim().includes(capability)))
+        throw new Error(`Unsupported Codex CLI exec capability surface: missing ${capability}.`);
     }
     const outputSchema = await fs.realpath(this.options.outputSchemaPath);
     const schemaRelative = path.relative(approved, outputSchema);
@@ -309,19 +320,25 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     validateJsonSchemaDefinition(schema);
     const prompt = JSON.stringify(packet);
     const args = [
+      '--ask-for-approval',
+      'on-request',
       'exec',
       '--json',
       '--sandbox',
       'workspace-write',
-      '--ask-for-approval',
-      'on-request',
       '--cd',
       root,
       '--output-schema',
       outputSchema,
       prompt,
     ];
-    if (args.some((argument) => FORBIDDEN_ARGUMENT.test(argument)))
+    if (
+      args.some((argument) => FORBIDDEN_ARGUMENT.test(argument)) ||
+      args.includes('--approve-for-me') ||
+      args[0] !== '--ask-for-approval' ||
+      args[1] !== 'on-request' ||
+      args[2] !== 'exec'
+    )
       throw new Error('Codex invocation contains a forbidden permission or bypass argument.');
     const result = await (this.options.spawnProcess ?? spawnGovernedProcess)(
       executable,
@@ -459,6 +476,26 @@ async function probeCodexCapabilities(
     child.once('error', reject);
     child.once('close', (code) =>
       code === 0 ? resolve(`exec\n${output}`) : reject(new Error('Codex capability probe failed.')),
+    );
+  });
+}
+
+async function probeCodexGlobalCapabilities(
+  executable: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, ['--help'], {
+      env: environment,
+      shell: false,
+      windowsHide: true,
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => (output += String(chunk)));
+    child.stderr.on('data', (chunk) => (output += String(chunk)));
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve(output) : reject(new Error('Codex global capability probe failed.')),
     );
   });
 }
@@ -1620,3 +1657,4 @@ export async function runnerStatus(
     output_tokens: (lastDispatch?.details.output_tokens as number | undefined) ?? 'unknown',
   };
 }
+
