@@ -291,13 +291,9 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     const globalCapabilities = await (
       this.options.globalCapabilityProbe ?? probeCodexGlobalCapabilities
     )(executable, probeEnvironment);
-    if (
-      !globalCapabilities
-        .split(/\r?\n/)
-        .some((line) => line.trim().includes('--ask-for-approval <APPROVAL_POLICY>'))
-    )
+    if (!supportsManagedOnRequestPolicy(globalCapabilities))
       throw new Error(
-        'Unsupported Codex CLI global capability surface: missing --ask-for-approval <APPROVAL_POLICY>.',
+        'Unsupported or ambiguous Codex CLI global capability surface for --ask-for-approval on-request.',
       );
     const execCapabilities = await (this.options.capabilityProbe ?? probeCodexCapabilities)(
       executable,
@@ -498,6 +494,15 @@ async function probeCodexGlobalCapabilities(
       code === 0 ? resolve(output) : reject(new Error('Codex global capability probe failed.')),
     );
   });
+}
+
+function supportsManagedOnRequestPolicy(capabilities: string): boolean {
+  const lines = capabilities.split(/\r?\n/).map((line) => line.trim());
+  const optionDeclarations = lines.filter((line) =>
+    /^(?:-a,\s+)?--ask-for-approval <APPROVAL_POLICY>$/.test(line),
+  );
+  const onRequestValues = lines.filter((line) => /^-\s+on-request:\s+\S/.test(line));
+  return optionDeclarations.length === 1 && onRequestValues.length === 1;
 }
 
 async function runGhJson(

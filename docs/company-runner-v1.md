@@ -4,7 +4,7 @@ Company Runner V1 is a single-task, run-once control plane. The company Markdown
 
 Use `runCompanyOnce` with an explicit `TASK-###`, company root, task-local state directory, and dispatcher. `dryRun: true` computes the same fingerprint and dispatch identity while making no agent or GitHub call and changing no authoritative file. Production dispatch requires the constrained `CodexAgentDispatcher`; deterministic tests and rehearsals use `FakeAgentDispatcher`.
 
-The production adapter probes the Codex global and `exec` help surfaces separately. For Codex CLI 0.149, the managed human-approval policy is a global option, so the direct argument array starts with `--ask-for-approval`, `on-request`, `exec`. `--approve-for-me` has different automatic-review semantics and is never substituted or allowed.
+The production adapter probes the Codex global and `exec` help surfaces separately. The global probe must contain exactly one canonical `--ask-for-approval <APPROVAL_POLICY>` declaration and exactly one advertised `on-request` value; missing, malformed, unsupported, or duplicate/ambiguous evidence fails closed before launch. For Codex CLI 0.149, the managed human-approval policy is a global option, so the direct argument array starts with `--ask-for-approval`, `on-request`, `exec`. `--approve-for-me` has different automatic-review semantics and is never substituted or allowed.
 
 The default is one dispatch. RED/UNKNOWN, `APPROVED`, unresolved `BLOCKED`, terminal/unchanged state, lease contention, stop file, integrity failure, and ambiguous launch recovery stop without a new model invocation. The module has no daemon installation, multi-task queue, external advisor/API, or workflow-mutation adapter.
 
