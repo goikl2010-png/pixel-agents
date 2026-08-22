@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "active": false,
+  "mode": "run-once",
+  "task_id": "TASK-XXX",
+  "max_dispatches": 1,
+  "dispatcher": "deterministic-fake",
+  "approval_policy": "on-request",
+  "company_root": "<absolute-approved-company-root>",
+  "state_directory": "<disposable-or-operator-approved-state-directory>",
+  "stop_file": "<absolute-operator-controlled-stop-file>",
+  "timeout_ms": 120000,
+  "lease_ttl_ms": 30000,
+  "heartbeat_ms": 10000,
+  "circuit_failure_threshold": 3,
+  "workflow_mutation_adapter": false,
+  "credential_environment_variable": "GH_TOKEN"
+}
