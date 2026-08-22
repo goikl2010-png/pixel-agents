@@ -353,7 +353,8 @@ describe('dist/cli.js entry-point guard', () => {
         string,
         unknown
       >;
-      expect(JSON.stringify(settings)).toContain(installedHook);
+      const escapedInstalledHook = JSON.stringify(installedHook).slice(1, -1);
+      expect(JSON.stringify(settings)).toContain(escapedInstalledHook);
     } finally {
       await stopChild(child);
       fs.rmSync(tmpHome, { recursive: true, force: true });

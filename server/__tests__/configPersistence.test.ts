@@ -4,24 +4,23 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { parseAreaMappings, readConfig, writeConfig } from '../src/configPersistence.js';
+import { isolateTestHome } from './helpers/testHome.js';
 
 describe('configPersistence: areas', () => {
   let tempHome: string;
-  let originalHome: string | undefined;
+  let restoreTestHome: () => void;
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-config-test-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    restoreTestHome = isolateTestHome(tempHome);
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
+    try {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    } finally {
+      restoreTestHome();
     }
-    fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
   // ── parseAreaMappings ────────────────────────────────────────
