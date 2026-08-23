@@ -111,9 +111,46 @@ export interface GitHubFactResolver {
 
 export interface GhCliResolverOptions {
   executable?: 'gh' | 'gh.exe';
-  credentialEnvironmentVariable: 'GH_TOKEN' | 'GITHUB_TOKEN';
+  credentialEnvironmentVariable: 'GH_TOKEN';
   parentEnvironment?: NodeJS.ProcessEnv;
   run?: typeof runGhJson;
+}
+
+export interface GovernedGitHubPreflightOptions {
+  executable?: 'gh' | 'gh.exe';
+  repository: string;
+  parentEnvironment?: NodeJS.ProcessEnv;
+  run?: typeof runGhJson;
+}
+
+/**
+ * Performs a value-blind, repository-scoped GitHub capability check. The
+ * returned facts contain only non-secret identity and repository metadata.
+ */
+export async function preflightGovernedGitHubAuthentication(
+  options: GovernedGitHubPreflightOptions,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!/^[^/\s]+\/[^/\s]+$/.test(options.repository))
+    throw new Error('Governed GitHub repository scope is invalid.');
+  const executable = options.executable ?? (process.platform === 'win32' ? 'gh.exe' : 'gh');
+  if (!['gh', 'gh.exe'].includes(executable))
+    throw new Error('GitHub preflight executable is not allowlisted.');
+  const environment = buildGovernedChildEnvironment(
+    options.parentEnvironment ?? process.env,
+    'GH_TOKEN',
+  );
+  const run = options.run ?? runGhJson;
+  const [identity, repository] = await Promise.all([
+    run(executable, ['api', 'user'], environment, signal),
+    run(executable, ['api', `repos/${options.repository}`], environment, signal),
+  ]);
+  const login = (identity as { login?: unknown }).login;
+  const fullName = (repository as { full_name?: unknown }).full_name;
+  if (typeof login !== 'string' || login.trim().length === 0)
+    throw new Error('GitHub preflight identity is unavailable.');
+  if (fullName !== options.repository)
+    throw new Error('GitHub preflight repository scope is outside the approved repository.');
 }
 
 export class GhCliGitHubFactResolver implements GitHubFactResolver {
@@ -127,9 +164,18 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       throw new Error('GitHub fact resolver executable is not allowlisted.');
     const environment = buildGovernedChildEnvironment(
       this.options.parentEnvironment ?? process.env,
-      this.options.credentialEnvironmentVariable,
+      'GH_TOKEN',
     );
     const run = this.options.run ?? runGhJson;
+    await preflightGovernedGitHubAuthentication(
+      {
+        executable,
+        repository: expected.repository,
+        parentEnvironment: this.options.parentEnvironment,
+        run,
+      },
+      signal,
+    );
     const [issue, pr] = await Promise.all([
       run(
         executable,
@@ -246,7 +292,7 @@ export interface CodexDispatcherOptions {
   allowedExecutable: string;
   outputSchemaPath: string;
   timeoutMs: number;
-  credentialEnvironmentVariable: 'GH_TOKEN' | 'GITHUB_TOKEN';
+  credentialEnvironmentVariable: 'GH_TOKEN';
   parentEnvironment?: NodeJS.ProcessEnv;
   versionProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   globalCapabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
@@ -278,10 +324,10 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       throw new Error('Codex working root escapes the approved root.');
     const childEnvironment = buildGovernedChildEnvironment(
       this.options.parentEnvironment ?? process.env,
-      this.options.credentialEnvironmentVariable,
+      'GH_TOKEN',
     );
     const probeEnvironment = { ...childEnvironment };
-    delete probeEnvironment[this.options.credentialEnvironmentVariable];
+    delete probeEnvironment.GH_TOKEN;
     const version = await (this.options.versionProbe ?? probeCodexVersion)(
       executable,
       probeEnvironment,
@@ -350,7 +396,6 @@ export class CodexAgentDispatcher implements AgentDispatcher {
   }
 }
 
-const CREDENTIAL_ALLOWLIST = ['GH_TOKEN', 'GITHUB_TOKEN'] as const;
 const SAFE_PARENT_ENVIRONMENT = [
   'ALLUSERSPROFILE',
   'APPDATA',
@@ -386,17 +431,15 @@ function environmentEntries(parent: NodeJS.ProcessEnv, wanted: string): Array<[s
  * by Runner results, audit, status, approval, prompts, arguments, or errors. */
 export function buildGovernedChildEnvironment(
   parent: NodeJS.ProcessEnv,
-  credentialVariable: 'GH_TOKEN' | 'GITHUB_TOKEN',
+  credentialVariable: 'GH_TOKEN',
 ): NodeJS.ProcessEnv {
-  if (!CREDENTIAL_ALLOWLIST.includes(credentialVariable))
-    throw new Error('Configured GitHub credential source is not allowlisted.');
+  if (credentialVariable !== 'GH_TOKEN')
+    throw new Error('Configured GitHub credential source is not the canonical GH_TOKEN.');
   const selected = environmentEntries(parent, credentialVariable);
-  const other = CREDENTIAL_ALLOWLIST.flatMap((name) =>
-    name === credentialVariable ? [] : environmentEntries(parent, name),
-  );
+  const conflicting = environmentEntries(parent, 'GITHUB_TOKEN');
   if (selected.length !== 1 || selected[0][1].trim().length === 0)
     throw new Error('Governed GitHub credential is absent, empty, or ambiguous.');
-  if (other.length > 0)
+  if (conflicting.length > 0)
     throw new Error('Conflicting governed GitHub credential sources are present.');
 
   const child: NodeJS.ProcessEnv = {};

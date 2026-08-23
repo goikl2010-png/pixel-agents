@@ -10,6 +10,7 @@ import {
   evaluateGovernanceAction,
   FakeAgentDispatcher,
   GhCliGitHubFactResolver,
+  preflightGovernedGitHubAuthentication,
   type GitHubFactResolver,
   isLegalRunnerTransition,
   readRunnerTask,
@@ -216,19 +217,21 @@ it('resolves typed live GitHub facts through fixed gh API paths without disclosi
     parentEnvironment: { GH_TOKEN: 'fake-live-fact-sentinel', PATH: 'safe' },
     run: async (_executable, args, env) => {
       calls.push({ args, env });
-      return args[1].includes('/issues/')
-        ? { state: 'open' }
-        : {
-            state: 'open',
-            draft: true,
-            merged_at: null,
-            base: { ref: 'main' },
-            head: { ref: githubFacts.branch, sha: githubFacts.head },
-          };
+      if (args[1] === 'user') return { login: 'fake-operator' };
+      if (args[1] === `repos/${githubFacts.repository}`)
+        return { full_name: githubFacts.repository };
+      if (args[1].includes('/issues/')) return { state: 'open' };
+      return {
+        state: 'open',
+        draft: true,
+        merged_at: null,
+        base: { ref: 'main' },
+        head: { ref: githubFacts.branch, sha: githubFacts.head },
+      };
     },
   });
   await expect(resolver.resolve(task, new AbortController().signal)).resolves.toEqual(githubFacts);
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(4);
   expect(calls.every((call) => call.env.GH_TOKEN === 'fake-live-fact-sentinel')).toBe(true);
   expect(JSON.stringify(calls.map((call) => call.args))).not.toContain('fake-live-fact-sentinel');
 });
@@ -440,6 +443,45 @@ it.each([
   [{ GH_TOKEN: 'one', gh_token: 'two' }, 'ambiguous'],
 ])('refuses missing, empty, conflicting, or ambiguous credentials', (parent, reason) => {
   expect(() => buildGovernedChildEnvironment(parent, 'GH_TOKEN')).toThrow(reason);
+});
+
+it('rejects the legacy GITHUB_TOKEN source before any child can launch', () => {
+  expect(() =>
+    buildGovernedChildEnvironment(
+      { GITHUB_TOKEN: 'fake-legacy-sentinel' },
+      'GITHUB_TOKEN' as never,
+    ),
+  ).toThrow('canonical GH_TOKEN');
+});
+
+it('keeps GH_TOKEN process-scoped and leaves no parent or durable child copy', () => {
+  const parent = { GH_TOKEN: 'fake-cleanup-sentinel' };
+  const child = buildGovernedChildEnvironment(parent, 'GH_TOKEN');
+  expect(parent.GH_TOKEN).toBe('fake-cleanup-sentinel');
+  expect(child.GH_TOKEN).toBe('fake-cleanup-sentinel');
+  delete child.GH_TOKEN;
+  expect(child.GH_TOKEN).toBeUndefined();
+  expect(parent.GH_TOKEN).toBe('fake-cleanup-sentinel');
+});
+
+it('fails closed when value-blind repository preflight is out of scope', async () => {
+  let calls = 0;
+  await expect(
+    preflightGovernedGitHubAuthentication(
+      {
+        repository: 'goikl2010-png/pixel-agents',
+        parentEnvironment: { GH_TOKEN: 'fake-preflight-sentinel' },
+        run: async (_executable, args) => {
+          calls++;
+          return args[1] === 'user'
+            ? { login: 'fake-operator' }
+            : { full_name: 'other-owner/other-repository' };
+        },
+      },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('outside the approved repository');
+  expect(calls).toBe(2);
 });
 
 it('preserves inherited Git config while adding OpenSSL without collision', () => {
