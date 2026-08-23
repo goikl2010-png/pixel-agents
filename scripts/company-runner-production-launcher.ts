@@ -116,6 +116,8 @@ function assertExactAuthorization(
   const configurationSha256 = task019ConfigurationSha256(config);
   if (auth.configuration_sha256 !== configurationSha256)
     throw new Error('Production launch authorization does not cover the canonical configuration.');
+  if (auth.target_sha256 !== config.target_sha256)
+    throw new Error('Production launch authorization target fingerprint drifted.');
   const exact: Array<[string, unknown, unknown]> = [
     ['runner commit', auth.runner_commit, config.runner_commit],
     ['executable', auth.executable, config.executable],
