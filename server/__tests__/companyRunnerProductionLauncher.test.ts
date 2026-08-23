@@ -1,11 +1,13 @@
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { launchProductionCompanyRunner } from '../../scripts/company-runner-production-launcher.js';
 
-const configPath = path.resolve('config/company-runner-v1-task-019-preflight.json');
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const configPath = path.join(repositoryRoot, 'config/company-runner-v1-task-019-preflight.json');
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -48,7 +50,7 @@ describe('production Company Runner launcher', () => {
 
   it('does not include a credential value in its source or public result shape', async () => {
     const source = await import('fs/promises').then(({ readFile }) =>
-      readFile(path.resolve('scripts/company-runner-production-launcher.ts'), 'utf8'),
+      readFile(path.join(repositoryRoot, 'scripts/company-runner-production-launcher.ts'), 'utf8'),
     );
     expect(source).not.toContain('GH_TOKEN_VALUE_SENTINEL');
     expect(source).not.toContain('GITHUB_TOKEN_VALUE_SENTINEL');
