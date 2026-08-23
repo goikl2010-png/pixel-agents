@@ -30,10 +30,11 @@ Do not use `--runner-fake` against authoritative company files; use the shadow h
 
 This section is a checklist, not authorization. Stop unless Goi provides fresh written authorization naming one non-protected task and the exact reviewed commit/configuration. It must state the exact Codex executable/version/capabilities, approved root, argument array, selected ephemeral auth variable, expected effects, rollback owner, timeout, stop conditions, and explicitly authorize one live dispatch.
 
-Before that dispatch record clean checkout and hashes for `main`, task, evidence, configuration, executable, schemas, and lockfile; OPEN Issue/PR and exact head; matching task state/owner/current-head evidence; exact allowlisted executable and probes; absolute root; output schema; `workspace-write`; `on-request`; free lease; closed circuit; no recovery ambiguity/pending approval; isolated state; stop file; timeout; and rollback location.
+Before that dispatch record clean checkout and hashes for `main`, task, evidence, configuration, executable, schemas, and lockfile; OPEN Issue/PR and exact head; matching task state/owner/current-head evidence; exact allowlisted executable and separate global/`exec` probes; absolute root; output schema; `workspace-write`; global `--ask-for-approval on-request` before `exec`; free lease; closed circuit; no recovery ambiguity/pending approval; isolated state; stop file; timeout; and rollback location. `--approve-for-me` is not equivalent and is prohibited.
 
 Supply exactly one non-empty, case-unambiguous `GH_TOKEN` or `GITHUB_TOKEN` only in the child environment. Exclude unrelated secrets. Compose process-scoped OpenSSL Git configuration without collision, keep TLS verification enabled, and write no global/repository configuration.
 
 Stop on hash/fact drift, protected scope, missing evidence, credential ambiguity, schema/capability mismatch, lease contention, heartbeat loss, timeout, signal/kill switch, open circuit, approval requirement, recovery ambiguity, unexpected effect, or lifecycle mutation request. Rollback terminates the bounded child, preserves audit/status, revokes only an exposed ephemeral credential if needed, and leaves authoritative task/GitHub/configuration untouched for Alex.
 
 Afterward capture result, audit/status chain, retry and token/model accounting, lease/circuit/recovery, hashes, external effects, stop/rollback actions, and secret-scan result. Success does not authorize another dispatch, service, scheduler, watcher, deployment, TASK-011 integration, merge, closure, or activation.
+
