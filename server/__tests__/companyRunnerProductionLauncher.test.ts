@@ -12,7 +12,6 @@ import {
   launchProductionCompanyRunner,
   type ProductionLaunchOptions,
 } from '../../scripts/company-runner-production-launcher.js';
-import { task019ConfigurationSha256 } from '../../scripts/company-runner-task-019-preflight.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const canonicalConfigPath = path.join(
@@ -127,7 +126,7 @@ async function fixture(): Promise<Fixture> {
       branch: 'task/TASK-020-reconcile-company-runner-roadmap',
       head: config.target_head,
     },
-    configuration_sha256: task019ConfigurationSha256(config),
+    configuration_sha256: sha256(`${JSON.stringify(config, null, 2)}\n`),
     runner_commit: RUNNER_HEAD,
     executable: config.executable,
     codex_version: config.codex_version,
