@@ -231,6 +231,16 @@ function seams(candidate: Fixture, counters: { github: number; spawn: number }) 
   return options;
 }
 
+async function stoppedByCanonicalWindowsPathGate(
+  options: ProductionLaunchOptions,
+  counters: { github: number; spawn: number },
+): Promise<boolean> {
+  if (process.platform === 'win32') return false;
+  await expect(launchProductionCompanyRunner(options)).rejects.toThrow('absolute Windows path');
+  expect(counters).toEqual({ github: 0, spawn: 0 });
+  return true;
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -243,7 +253,9 @@ describe('production Company Runner launcher', () => {
   it('constructs the real dispatcher and reaches exactly one governed fake process spawn', async () => {
     const candidate = await fixture();
     const counters = { github: 0, spawn: 0 };
-    const result = await launchProductionCompanyRunner(seams(candidate, counters));
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+    const result = await launchProductionCompanyRunner(options);
     expect(result.outcome).toBe('DISPATCHED');
     expect(counters.github).toBe(4);
     expect(counters.spawn).toBe(1);
@@ -340,6 +352,7 @@ describe('production Company Runner launcher', () => {
       ...provenance,
       root: provenance.root === repositoryRoot ? checkoutRoot : provenance.root,
     });
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
     await expect(launchProductionCompanyRunner(options)).rejects.toThrow(/checkout/i);
     expect(counters).toEqual({ github: 0, spawn: 0 });
   });
@@ -351,6 +364,7 @@ describe('production Company Runner launcher', () => {
     options.checkoutProbe = async () => {
       throw new Error('unavailable');
     };
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
     await expect(launchProductionCompanyRunner(options)).rejects.toThrow('unavailable');
     expect(counters).toEqual({ github: 0, spawn: 0 });
   });
@@ -362,6 +376,7 @@ describe('production Company Runner launcher', () => {
       const counters = { github: 0, spawn: 0 };
       const options = seams(candidate, counters);
       options.versionProbe = async () => version;
+      if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
       await expect(launchProductionCompanyRunner(options)).rejects.toThrow('exact authorization');
       expect(counters).toEqual({ github: 0, spawn: 0 });
     },
@@ -372,7 +387,9 @@ describe('production Company Runner launcher', () => {
     await mkdir(candidate.stateDirectory, { recursive: true });
     await writeFile(candidate.stopFile, 'stop\n');
     const counters = { github: 0, spawn: 0 };
-    const result = await launchProductionCompanyRunner(seams(candidate, counters));
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+    const result = await launchProductionCompanyRunner(options);
     expect(result.outcome).toBe('STOPPED');
     expect(counters).toEqual({ github: 0, spawn: 0 });
   });
@@ -396,7 +413,9 @@ describe('production Company Runner launcher', () => {
       }),
     );
     const counters = { github: 0, spawn: 0 };
-    const result = await launchProductionCompanyRunner(seams(candidate, counters));
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+    const result = await launchProductionCompanyRunner(options);
     expect(result.outcome).toBe('LEASE_CONTENDED');
     expect(counters.spawn).toBe(0);
   });
@@ -405,6 +424,7 @@ describe('production Company Runner launcher', () => {
     const candidate = await fixture();
     const counters = { github: 0, spawn: 0 };
     const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
     await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
       outcome: 'DISPATCHED',
     });
@@ -418,6 +438,7 @@ describe('production Company Runner launcher', () => {
     const candidate = await fixture();
     const counters = { github: 0, spawn: 0 };
     const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
     options.spawnProcess = async () => {
       counters.spawn++;
       throw new Error('ambiguous process boundary');
