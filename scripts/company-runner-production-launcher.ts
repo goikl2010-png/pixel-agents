@@ -1,9 +1,11 @@
+import { execFile } from 'child_process';
 import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import * as path from 'path';
+import { promisify } from 'util';
 
 import {
-  type AgentDispatcher,
+  buildGovernedChildEnvironment,
   CodexAgentDispatcher,
   GhCliGitHubFactResolver,
   type GitHubFacts,
@@ -46,7 +48,6 @@ export interface ProductionLaunchOptions {
   authorizationPath: string;
   companyRoot: string;
   parentEnvironment?: NodeJS.ProcessEnv;
-  dispatcher?: AgentDispatcher;
   githubRun?: (
     executable: string,
     args: string[],
@@ -57,6 +58,13 @@ export interface ProductionLaunchOptions {
   globalCapabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   capabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   spawnProcess?: ConstructorParameters<typeof CodexAgentDispatcher>[0]['spawnProcess'];
+  checkoutProbe?: (checkoutRoot: string) => Promise<RunnerCheckoutProvenance>;
+}
+
+export interface RunnerCheckoutProvenance {
+  root: string;
+  head: string;
+  dirty: boolean;
 }
 
 export interface SanitizedProductionLaunchResult {
@@ -68,6 +76,80 @@ export interface SanitizedProductionLaunchResult {
 
 const GIT_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const AUTHORIZATION_KEYS = [
+  'schema_version',
+  'authorization',
+  'authorized_by',
+  'task_id',
+  'target_state',
+  'target_owner',
+  'target_sha256',
+  'github',
+  'configuration_sha256',
+  'runner_commit',
+  'executable',
+  'codex_version',
+  'approved_working_root',
+  'output_schema',
+  'argument_template',
+  'credential_environment_variable',
+  'max_dispatches',
+  'expected_effects',
+  'rollback',
+  'timeout_ms',
+  'stop_conditions',
+] as const;
+const GITHUB_KEYS = [
+  'repository',
+  'issue',
+  'issueState',
+  'pr',
+  'prState',
+  'draft',
+  'base',
+  'branch',
+  'head',
+] as const;
+export const EXACT_EXPECTED_EFFECTS = [
+  'Dispatch Pixel exactly once for authorized TASK-020 QA at READY_FOR_QA.',
+  'Permit only Pixel-owned TASK-020 QA evidence and legal task handoff updates.',
+] as const;
+export const EXACT_ROLLBACK =
+  'Stop the one-shot Runner, preserve audit evidence, and do not redispatch after ambiguity.';
+export const EXACT_STOP_CONDITIONS = [
+  'Any authorization, configuration, target, checkout, GitHub, or credential drift.',
+  'Any Codex executable, version, capability, root, schema, or argument drift.',
+  'Any lease, recovery, deduplication, circuit, heartbeat, timeout, or stop signal.',
+] as const;
+const CREDENTIAL_CONTENT =
+  /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|bearer\s+\S+|-----BEGIN [^-]*PRIVATE KEY-----|(?:password|secret|token|private[_ -]?key)\s*[:=]\s*\S+)/i;
+const execFileAsync = promisify(execFile);
+const runnerCheckoutRoot = path.resolve(__dirname, '..');
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  return Object.keys(value).sort().join('\n') === [...expected].sort().join('\n');
+}
+
+function isNormalizedUniqueNonEmptyStrings(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (entry) => typeof entry === 'string' && entry.length > 0 && entry === entry.trim(),
+    ) &&
+    new Set(value).size === value.length
+  );
+}
+
+function containsCredentialContent(value: unknown): boolean {
+  if (typeof value === 'string') return CREDENTIAL_CONTENT.test(value);
+  if (Array.isArray(value)) return value.some(containsCredentialContent);
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(
+    ([key, nested]) =>
+      /(?:password|secret|token|private[_-]?key)/i.test(key) || containsCredentialContent(nested),
+  );
+}
 
 async function readJson(file: string): Promise<unknown> {
   try {
@@ -80,7 +162,17 @@ async function readJson(file: string): Promise<unknown> {
 function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAuthorization {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Production launch authorization is not an object.');
-  const auth = value as Partial<GoiRedLaunchAuthorization>;
+  const record = value as Record<string, unknown>;
+  if (!hasExactKeys(record, AUTHORIZATION_KEYS))
+    throw new Error('Production launch authorization has missing or unknown fields.');
+  if (!record.github || typeof record.github !== 'object' || Array.isArray(record.github))
+    throw new Error('Production launch authorization GitHub facts are malformed.');
+  if (!hasExactKeys(record.github as Record<string, unknown>, GITHUB_KEYS))
+    throw new Error('Production launch authorization GitHub facts have missing or unknown fields.');
+  const credentialSafeCopy = { ...record, credential_environment_variable: undefined };
+  if (containsCredentialContent(credentialSafeCopy))
+    throw new Error('Production launch authorization contains credential-like content.');
+  const auth = record as unknown as Partial<GoiRedLaunchAuthorization>;
   if (
     auth.schema_version !== '1' ||
     auth.authorization !== 'RED' ||
@@ -94,10 +186,12 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
     !SHA256.test(auth.target_sha256 ?? '') ||
     !SHA256.test(auth.configuration_sha256 ?? '') ||
     !GIT_SHA.test(auth.runner_commit ?? '') ||
-    !Array.isArray(auth.argument_template) ||
-    !Array.isArray(auth.expected_effects) ||
-    !Array.isArray(auth.stop_conditions) ||
+    !isNormalizedUniqueNonEmptyStrings(auth.argument_template) ||
+    !isNormalizedUniqueNonEmptyStrings(auth.expected_effects) ||
+    !isNormalizedUniqueNonEmptyStrings(auth.stop_conditions) ||
     typeof auth.rollback !== 'string' ||
+    auth.rollback.length === 0 ||
+    auth.rollback !== auth.rollback.trim() ||
     !Number.isInteger(auth.timeout_ms) ||
     (auth.timeout_ms ?? 0) < 1 ||
     (auth.timeout_ms ?? 0) > 120_000
@@ -119,7 +213,6 @@ function assertExactAuthorization(
   if (auth.target_sha256 !== config.target_sha256)
     throw new Error('Production launch authorization target fingerprint drifted.');
   const exact: Array<[string, unknown, unknown]> = [
-    ['runner commit', auth.runner_commit, config.runner_commit],
     ['executable', auth.executable, config.executable],
     ['Codex version', auth.codex_version, config.codex_version],
     ['approved working root', auth.approved_working_root, config.approved_working_root],
@@ -136,6 +229,12 @@ function assertExactAuthorization(
     if (actual !== expected) throw new Error(`Production authorization ${name} drifted.`);
   if (JSON.stringify(auth.argument_template) !== JSON.stringify(config.argument_template))
     throw new Error('Production authorization argument template drifted.');
+  if (JSON.stringify(auth.expected_effects) !== JSON.stringify(EXACT_EXPECTED_EFFECTS))
+    throw new Error('Production authorization expected effects drifted.');
+  if (auth.rollback !== EXACT_ROLLBACK)
+    throw new Error('Production authorization rollback drifted.');
+  if (JSON.stringify(auth.stop_conditions) !== JSON.stringify(EXACT_STOP_CONDITIONS))
+    throw new Error('Production authorization stop conditions drifted.');
   if (
     auth.github.repository !== config.target_repository ||
     auth.github.issue !== config.target_issue ||
@@ -148,6 +247,54 @@ function assertExactAuthorization(
     auth.github.draft
   )
     throw new Error('Production authorization GitHub facts drifted.');
+}
+
+async function probeRunnerCheckout(checkoutRoot: string): Promise<RunnerCheckoutProvenance> {
+  try {
+    const [rootResult, headResult, statusResult] = await Promise.all([
+      execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: checkoutRoot }),
+      execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: checkoutRoot }),
+      execFileAsync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
+        cwd: checkoutRoot,
+      }),
+    ]);
+    return {
+      root: rootResult.stdout.trim(),
+      head: headResult.stdout.trim(),
+      dirty: statusResult.stdout.length > 0,
+    };
+  } catch {
+    throw new Error('Runner checkout provenance is unavailable or ambiguous.');
+  }
+}
+
+function assertRunnerCheckout(
+  provenance: RunnerCheckoutProvenance,
+  authorization: GoiRedLaunchAuthorization,
+): void {
+  if (
+    path.resolve(provenance.root) !== runnerCheckoutRoot ||
+    !GIT_SHA.test(provenance.head) ||
+    provenance.dirty
+  )
+    throw new Error('Runner checkout provenance is unavailable, ambiguous, or dirty.');
+  if (provenance.head !== authorization.runner_commit)
+    throw new Error('Runner checkout is stale or differs from the authorized merged commit.');
+}
+
+async function probeProductionCodexVersion(
+  executable: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  try {
+    const result = await execFileAsync(executable, ['--version'], {
+      env: environment,
+      windowsHide: true,
+    });
+    return result.stdout.trim();
+  } catch {
+    throw new Error('Codex version probe failed.');
+  }
 }
 
 function sanitizeResult(result: RunOnceResult): SanitizedProductionLaunchResult {
@@ -178,6 +325,21 @@ export async function launchProductionCompanyRunner(
   if (path.resolve(options.companyRoot) !== path.resolve(config.approved_working_root))
     throw new Error('Production Company Runner root drifted from the canonical package.');
 
+  const provenance = await (options.checkoutProbe ?? probeRunnerCheckout)(runnerCheckoutRoot);
+  assertRunnerCheckout(provenance, authorization);
+
+  const probeEnvironment = buildGovernedChildEnvironment(
+    options.parentEnvironment ?? process.env,
+    config.credential_environment_variable,
+  );
+  delete probeEnvironment[config.credential_environment_variable];
+  const installedVersion = await (options.versionProbe ?? probeProductionCodexVersion)(
+    config.executable,
+    probeEnvironment,
+  );
+  if (installedVersion !== authorization.codex_version || installedVersion !== config.codex_version)
+    throw new Error('Installed Codex version differs from the exact authorization.');
+
   const task = await readRunnerTask(options.companyRoot, config.task_id);
   if (
     task.state !== config.target_state ||
@@ -200,24 +362,26 @@ export async function launchProductionCompanyRunner(
       return facts;
     },
   };
-  const dispatcher =
-    options.dispatcher ??
-    new CodexAgentDispatcher({
-      executable: config.executable,
-      allowedExecutable: config.executable,
-      workingRoot: config.approved_working_root,
-      approvedWorkingRoot: config.approved_working_root,
-      outputSchemaPath: config.output_schema,
-      timeoutMs: config.timeout_ms,
-      credentialEnvironmentVariable: config.credential_environment_variable,
-      parentEnvironment: options.parentEnvironment,
-      ...(options.versionProbe ? { versionProbe: options.versionProbe } : {}),
-      ...(options.globalCapabilityProbe
-        ? { globalCapabilityProbe: options.globalCapabilityProbe }
-        : {}),
-      ...(options.capabilityProbe ? { capabilityProbe: options.capabilityProbe } : {}),
-      ...(options.spawnProcess ? { spawnProcess: options.spawnProcess } : {}),
-    });
+  const exactVersionProbe = async (
+    _executable: string,
+    _environment: NodeJS.ProcessEnv,
+  ): Promise<string> => installedVersion;
+  const dispatcher = new CodexAgentDispatcher({
+    executable: config.executable,
+    allowedExecutable: config.executable,
+    workingRoot: config.approved_working_root,
+    approvedWorkingRoot: config.approved_working_root,
+    outputSchemaPath: config.output_schema,
+    timeoutMs: config.timeout_ms,
+    credentialEnvironmentVariable: config.credential_environment_variable,
+    parentEnvironment: options.parentEnvironment,
+    versionProbe: exactVersionProbe,
+    ...(options.globalCapabilityProbe
+      ? { globalCapabilityProbe: options.globalCapabilityProbe }
+      : {}),
+    ...(options.capabilityProbe ? { capabilityProbe: options.capabilityProbe } : {}),
+    ...(options.spawnProcess ? { spawnProcess: options.spawnProcess } : {}),
+  });
   try {
     const result = await runCompanyOnce({
       companyRoot: options.companyRoot,
