@@ -12,11 +12,10 @@ The default is one dispatch. RED/UNKNOWN, `APPROVED`, unresolved `BLOCKED`, term
 
 The operator must provide exactly one canonical source name (`GH_TOKEN`) to the constrained Codex dispatcher. `GITHUB_TOKEN`, enterprise variants, duplicate-case names, empty values, and any conflicting source are rejected. Missing, empty, malformed, or ambiguous input fails before GitHub preflight, version probing, or agent launch.
 
-Before any child launch, the Runner performs a value-blind `gh api user` identity check and an exact `gh api repos/<approved-repository>` scope check. Only non-secret response fields are validated; the credential value is never inspected, printed, serialized, hashed, logged, persisted, or returned.
+Before any child launch, the Runner resolves an explicit approved GitHub login (the configured login, or the exact owner of the approved repository), performs a value-blind `gh api user` identity check against that login, and performs an exact `gh api repos/<approved-repository>` scope check. GitHub logins are compared case-insensitively. Only non-secret response fields are validated; the credential value is never inspected, printed, serialized, hashed, logged, persisted, or returned.
 
 The value is passed only in the direct child-process environment. It is never accepted from CLI arguments, tasks, evidence, prompts, URLs, files, or configuration values, and is never serialized, hashed, logged, audited, returned, persisted, or included in status, approval packages, errors, or captured output. The child environment is constructed from a small operational OS allowlist instead of inheriting the parent secret environment.
 
 Git HTTPS uses process-scoped `http.sslBackend=openssl` by composition with inherited `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, and `GIT_CONFIG_VALUE_n` entries. Existing entries are preserved; malformed entries and a conflicting TLS backend fail closed. TLS verification remains enabled. The Runner never writes system, global, repository, or worktree Git configuration.
 
 State output and pending approval packages are local, versioned JSON. Treat the state directory as append-only evidence. Deleting or editing ledger records makes deduplication unsafe and fails closed.
-

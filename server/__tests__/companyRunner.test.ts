@@ -214,6 +214,7 @@ it('resolves typed live GitHub facts through fixed gh API paths without disclosi
   const calls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
   const resolver = new GhCliGitHubFactResolver({
     credentialEnvironmentVariable: 'GH_TOKEN',
+    approvedIdentity: 'fake-operator',
     parentEnvironment: { GH_TOKEN: 'fake-live-fact-sentinel', PATH: 'safe' },
     run: async (_executable, args, env) => {
       calls.push({ args, env });
@@ -470,6 +471,7 @@ it('fails closed when value-blind repository preflight is out of scope', async (
     preflightGovernedGitHubAuthentication(
       {
         repository: 'goikl2010-png/pixel-agents',
+        approvedIdentity: 'fake-operator',
         parentEnvironment: { GH_TOKEN: 'fake-preflight-sentinel' },
         run: async (_executable, args) => {
           calls++;
@@ -482,6 +484,80 @@ it('fails closed when value-blind repository preflight is out of scope', async (
     ),
   ).rejects.toThrow('outside the approved repository');
   expect(calls).toBe(2);
+});
+
+it('fails closed on a wrong GitHub identity before governed child launch', async () => {
+  const { root, stateDir } = await fixture();
+  const fake = new FakeAgentDispatcher();
+  const resolver = new GhCliGitHubFactResolver({
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    approvedIdentity: 'approved-operator',
+    parentEnvironment: { GH_TOKEN: 'fake-wrong-identity-sentinel' },
+    run: async (_executable, args) => {
+      if (args[1] === 'user') return { login: 'definitely-wrong-identity' };
+      return { full_name: githubFacts.repository };
+    },
+  });
+
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher: fake,
+      githubResolver: resolver,
+    }),
+  ).rejects.toThrow('does not match the approved identity');
+  expect(fake.calls).toHaveLength(0);
+});
+
+it.each([
+  { GH_TOKEN: 'fake', GH_ENTERPRISE_TOKEN: 'fake-enterprise' },
+  { GH_TOKEN: 'fake', GITHUB_ENTERPRISE_TOKEN: 'fake-enterprise' },
+  { GH_TOKEN: 'fake', gh_enterprise_token: 'fake-enterprise' },
+  {
+    GH_TOKEN: 'fake',
+    github_enterprise_token: 'fake-enterprise-one',
+    GitHub_Enterprise_Token: 'fake-enterprise-two',
+  },
+])('rejects enterprise credential variants before probe or child launch', async (parent) => {
+  let probes = 0;
+  let launches = 0;
+  const dispatcher = new CodexAgentDispatcher({
+    executable: 'codex',
+    allowedExecutable: 'codex',
+    outputSchemaPath: codexOutputSchemaPath,
+    workingRoot: path.resolve('.'),
+    approvedWorkingRoot: path.resolve('.'),
+    timeoutMs: 10,
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    parentEnvironment: parent,
+    versionProbe: async () => {
+      probes++;
+      return 'codex-cli 0.148.0';
+    },
+    spawnProcess: async () => {
+      launches++;
+      throw new Error('must not launch');
+    },
+  });
+
+  await expect(
+    dispatcher.dispatch(
+      {
+        schema_version: '1',
+        task: { id: 'TASK-016', path: 'task.md', fingerprint: 'sha256:fake' },
+        role: 'Nova',
+        state: 'DEVELOPMENT',
+        dispatch_id: 'sha256:dispatch',
+        evidence: [],
+        instruction: 'safe',
+      },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('Enterprise GitHub credential sources are not permitted');
+  expect(probes).toBe(0);
+  expect(launches).toBe(0);
 });
 
 it('preserves inherited Git config while adding OpenSSL without collision', () => {

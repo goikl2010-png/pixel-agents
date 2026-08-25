@@ -112,6 +112,7 @@ export interface GitHubFactResolver {
 export interface GhCliResolverOptions {
   executable?: 'gh' | 'gh.exe';
   credentialEnvironmentVariable: 'GH_TOKEN';
+  approvedIdentity?: string;
   parentEnvironment?: NodeJS.ProcessEnv;
   run?: typeof runGhJson;
 }
@@ -119,6 +120,7 @@ export interface GhCliResolverOptions {
 export interface GovernedGitHubPreflightOptions {
   executable?: 'gh' | 'gh.exe';
   repository: string;
+  approvedIdentity: string;
   parentEnvironment?: NodeJS.ProcessEnv;
   run?: typeof runGhJson;
 }
@@ -133,6 +135,8 @@ export async function preflightGovernedGitHubAuthentication(
 ): Promise<void> {
   if (!/^[^/\s]+\/[^/\s]+$/.test(options.repository))
     throw new Error('Governed GitHub repository scope is invalid.');
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(options.approvedIdentity))
+    throw new Error('Governed GitHub approved identity is invalid.');
   const executable = options.executable ?? (process.platform === 'win32' ? 'gh.exe' : 'gh');
   if (!['gh', 'gh.exe'].includes(executable))
     throw new Error('GitHub preflight executable is not allowlisted.');
@@ -149,6 +153,8 @@ export async function preflightGovernedGitHubAuthentication(
   const fullName = (repository as { full_name?: unknown }).full_name;
   if (typeof login !== 'string' || login.trim().length === 0)
     throw new Error('GitHub preflight identity is unavailable.');
+  if (login.toLowerCase() !== options.approvedIdentity.toLowerCase())
+    throw new Error('GitHub preflight identity does not match the approved identity.');
   if (fullName !== options.repository)
     throw new Error('GitHub preflight repository scope is outside the approved repository.');
 }
@@ -171,6 +177,7 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       {
         executable,
         repository: expected.repository,
+        approvedIdentity: this.options.approvedIdentity ?? expected.repository.split('/')[0],
         parentEnvironment: this.options.parentEnvironment,
         run,
       },
@@ -437,10 +444,16 @@ export function buildGovernedChildEnvironment(
     throw new Error('Configured GitHub credential source is not the canonical GH_TOKEN.');
   const selected = environmentEntries(parent, credentialVariable);
   const conflicting = environmentEntries(parent, 'GITHUB_TOKEN');
+  const enterprise = [
+    ...environmentEntries(parent, 'GH_ENTERPRISE_TOKEN'),
+    ...environmentEntries(parent, 'GITHUB_ENTERPRISE_TOKEN'),
+  ];
   if (selected.length !== 1 || selected[0][1].trim().length === 0)
     throw new Error('Governed GitHub credential is absent, empty, or ambiguous.');
   if (conflicting.length > 0)
     throw new Error('Conflicting governed GitHub credential sources are present.');
+  if (enterprise.length > 0)
+    throw new Error('Enterprise GitHub credential sources are not permitted.');
 
   const child: NodeJS.ProcessEnv = {};
   for (const name of SAFE_PARENT_ENVIRONMENT) {
