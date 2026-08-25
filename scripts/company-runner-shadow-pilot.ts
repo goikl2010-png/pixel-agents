@@ -26,7 +26,7 @@ export interface ShadowPilotConfig {
   heartbeat_ms: number;
   circuit_failure_threshold: number;
   workflow_mutation_adapter: false;
-  credential_environment_variable: 'GH_TOKEN' | 'GITHUB_TOKEN';
+  credential_environment_variable: 'GH_TOKEN';
 }
 
 const TASK_ID = /^TASK-\d{3}$/;
@@ -65,7 +65,7 @@ export function validateShadowPilotConfig(value: unknown): ShadowPilotConfig {
     config.dispatcher !== 'deterministic-fake' ||
     config.approval_policy !== 'on-request' ||
     config.workflow_mutation_adapter !== false ||
-    !['GH_TOKEN', 'GITHUB_TOKEN'].includes(String(config.credential_environment_variable))
+    config.credential_environment_variable !== 'GH_TOKEN'
   )
     throw new Error('Shadow pilot configuration violates a non-activation safety invariant.');
   for (const field of ['company_root', 'state_directory', 'stop_file'] as const) {
