@@ -1,4 +1,6 @@
+import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
+import { existsSync } from 'fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { hostname, tmpdir } from 'os';
 import * as path from 'path';
@@ -12,6 +14,7 @@ import {
   launchProductionCompanyRunner,
   type ProductionLaunchOptions,
 } from '../../scripts/company-runner-production-launcher.js';
+import { CliArgsError, parseArgs, validateRunnerCliMode } from '../src/cli.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const canonicalConfigPath = path.join(
@@ -26,6 +29,17 @@ const RUNNER_HEAD = 'b'.repeat(40);
 const TARGET_HEAD = '5b5357d3f6359d3df94ed5fe8371750fa34b25e3';
 const SENTINEL = 'fake-task-022-credential-never-disclose';
 const temporaryDirectories: string[] = [];
+const cliBundle = path.join(repositoryRoot, 'dist/cli.js');
+
+const productionCliArguments = [
+  '--runner-production-launch',
+  '--company-tasks-root',
+  'C:\\task-022-company',
+  '--runner-preflight-config',
+  'C:\\task-022-preflight.json',
+  '--runner-authorization',
+  'C:\\task-022-authorization.json',
+];
 
 interface Fixture {
   root: string;
@@ -246,6 +260,106 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
+});
+
+describe('production Company Runner CLI mode boundary', () => {
+  const safeModeCombinations = [
+    ['--runner-fake'],
+    ['--runner-dry-run'],
+    ['--runner-status'],
+    ['--runner-fake', '--runner-dry-run'],
+    ['--runner-fake', '--runner-status'],
+    ['--runner-dry-run', '--runner-status'],
+    ['--runner-fake', '--runner-dry-run', '--runner-status'],
+  ];
+
+  it.each(safeModeCombinations)(
+    'fails closed before production dispatch for safe-mode/status combination %j',
+    (...conflictingFlags) => {
+      const args = parseArgs([...productionCliArguments, ...conflictingFlags]);
+
+      expect(() => validateRunnerCliMode(args)).toThrow(CliArgsError);
+      expect(() => validateRunnerCliMode(args)).toThrow(
+        '--runner-production-launch cannot be combined with legacy Runner options',
+      );
+    },
+  );
+
+  it.each([
+    ['--runner-task', 'TASK-020'],
+    ['--runner-state-directory', 'C:\\task-022-runner-state'],
+    ['--runner-task', 'TASK-020', '--runner-state-directory', 'C:\\task-022-runner-state'],
+  ])('rejects production mixed with legacy Runner operation %j', (...legacyArguments) => {
+    const args = parseArgs([...productionCliArguments, ...legacyArguments]);
+
+    expect(() => validateRunnerCliMode(args)).toThrow(CliArgsError);
+    expect(() => validateRunnerCliMode(args)).toThrow(
+      '--runner-production-launch cannot be combined with legacy Runner options',
+    );
+  });
+
+  it.each([
+    ['--runner-preflight-config', 'C:\\task-022-preflight.json'],
+    ['--runner-authorization', 'C:\\task-022-authorization.json'],
+    [
+      '--runner-preflight-config',
+      'C:\\task-022-preflight.json',
+      '--runner-authorization',
+      'C:\\task-022-authorization.json',
+    ],
+  ])('rejects production-only input without the production selector %j', (...productionInputs) => {
+    const args = parseArgs(productionInputs);
+
+    expect(() => validateRunnerCliMode(args)).toThrow(CliArgsError);
+    expect(() => validateRunnerCliMode(args)).toThrow('require --runner-production-launch');
+  });
+
+  it('preserves the unambiguous production launch path', () => {
+    expect(() => validateRunnerCliMode(parseArgs(productionCliArguments))).not.toThrow();
+  });
+
+  it('exits nonzero before authorization or dispatch for every conflicting CLI mode', () => {
+    if (!existsSync(cliBundle)) return;
+    const conflictingArgumentSets = [
+      ...safeModeCombinations,
+      ['--runner-task', 'TASK-020'],
+      ['--runner-state-directory', 'C:\\task-022-runner-state'],
+      ['--runner-task', 'TASK-020', '--runner-state-directory', 'C:\\task-022-runner-state'],
+    ];
+
+    for (const conflictingArguments of conflictingArgumentSets) {
+      const result = spawnSync(
+        process.execPath,
+        [cliBundle, ...productionCliArguments, ...conflictingArguments],
+        { encoding: 'utf8', timeout: 5_000 },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        '--runner-production-launch cannot be combined with legacy Runner options',
+      );
+      expect(result.stderr).not.toContain('Production launch failed closed');
+    }
+
+    for (const productionInputs of [
+      ['--runner-preflight-config', 'C:\\task-022-preflight.json'],
+      ['--runner-authorization', 'C:\\task-022-authorization.json'],
+      [
+        '--runner-preflight-config',
+        'C:\\task-022-preflight.json',
+        '--runner-authorization',
+        'C:\\task-022-authorization.json',
+      ],
+    ]) {
+      const result = spawnSync(process.execPath, [cliBundle, ...productionInputs], {
+        encoding: 'utf8',
+        timeout: 5_000,
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('require --runner-production-launch');
+    }
+  }, 15_000);
 });
 
 describe('production Company Runner launcher', () => {

@@ -226,12 +226,38 @@ Options:
   return args;
 }
 
+export function validateRunnerCliMode(args: CliArgs): void {
+  const conflictingLegacyOptions = [
+    args.runnerTask !== undefined ? '--runner-task' : undefined,
+    args.runnerStateDirectory !== undefined ? '--runner-state-directory' : undefined,
+    args.runnerDryRun ? '--runner-dry-run' : undefined,
+    args.runnerStatus ? '--runner-status' : undefined,
+    args.runnerFake ? '--runner-fake' : undefined,
+  ].filter((option): option is string => option !== undefined);
+
+  if (args.runnerProductionLaunch && conflictingLegacyOptions.length > 0) {
+    throw new CliArgsError(
+      `--runner-production-launch cannot be combined with legacy Runner options: ${conflictingLegacyOptions.join(', ')}.`,
+    );
+  }
+
+  if (
+    !args.runnerProductionLaunch &&
+    (args.runnerPreflightConfig !== undefined || args.runnerAuthorization !== undefined)
+  ) {
+    throw new CliArgsError(
+      '--runner-preflight-config and --runner-authorization require --runner-production-launch.',
+    );
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   let args: CliArgs;
   try {
     args = parseArgs(process.argv.slice(2));
+    validateRunnerCliMode(args);
   } catch (err) {
     console.error(`[Pixel Agents] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
