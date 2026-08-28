@@ -184,7 +184,7 @@ function seams(candidate: Fixture, counters: { github: number; spawn: number }) 
     }),
     versionProbe: async (_executable, environment) => {
       expect(environment.GH_TOKEN).toBeUndefined();
-      return 'codex-cli 0.149.0';
+      return 'codex-cli 0.150.1';
     },
     globalCapabilityProbe: async () =>
       '-a, --ask-for-approval <APPROVAL_POLICY>\n- on-request: Ask when requested',
@@ -193,6 +193,9 @@ function seams(candidate: Fixture, counters: { github: number; spawn: number }) 
     githubRun: async (_executable, args, environment) => {
       counters.github++;
       expect(environment.GH_TOKEN).toBe(SENTINEL);
+      if (args[1] === 'user') return { login: 'goikl2010-png' };
+      if (args[1] === 'repos/goikl2010-png/AI-Company')
+        return { full_name: 'goikl2010-png/AI-Company' };
       return args[1].includes('/issues/')
         ? { state: 'open' }
         : {
@@ -370,7 +373,7 @@ describe('production Company Runner launcher', () => {
     if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
     const result = await launchProductionCompanyRunner(options);
     expect(result.outcome).toBe('DISPATCHED');
-    expect(counters.github).toBe(4);
+    expect(counters.github).toBe(8);
     expect(counters.spawn).toBe(1);
     expect(JSON.stringify(result)).not.toContain(SENTINEL);
     const source = await readFile(
@@ -482,18 +485,22 @@ describe('production Company Runner launcher', () => {
     expect(counters).toEqual({ github: 0, spawn: 0 });
   });
 
-  it.each(['codex-cli 0.148.0', 'codex-cli 0.150.0', '', 'ambiguous\ncodex-cli 0.149.0'])(
-    'rejects installed version drift %j before GitHub or process launch',
-    async (version) => {
-      const candidate = await fixture();
-      const counters = { github: 0, spawn: 0 };
-      const options = seams(candidate, counters);
-      options.versionProbe = async () => version;
-      if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
-      await expect(launchProductionCompanyRunner(options)).rejects.toThrow('exact authorization');
-      expect(counters).toEqual({ github: 0, spawn: 0 });
-    },
-  );
+  it.each([
+    'codex-cli 0.148.0',
+    'codex-cli 0.149.0',
+    'codex-cli 0.150.0',
+    'codex-cli 0.150.2',
+    '',
+    'ambiguous\ncodex-cli 0.150.1',
+  ])('rejects installed version drift %j before GitHub or process launch', async (version) => {
+    const candidate = await fixture();
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    options.versionProbe = async () => version;
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+    await expect(launchProductionCompanyRunner(options)).rejects.toThrow('exact authorization');
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+  });
 
   it('stops on the checked-in stop signal with zero spawn', async () => {
     const candidate = await fixture();

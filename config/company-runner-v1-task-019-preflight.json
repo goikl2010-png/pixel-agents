@@ -16,7 +16,7 @@
   "dispatcher": "codex",
   "approval_policy": "on-request",
   "executable": "C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd",
-  "codex_version": "codex-cli 0.149.0",
+  "codex_version": "codex-cli 0.150.1",
   "approved_working_root": "C:\\AI-Company",
   "output_schema": "C:\\AI-Company\\.worktrees\\TASK-019\\docs\\schemas\\company-runner-codex-output-v1.schema.json",
   "state_directory": "C:\\AI-Company\\.company-runner-state\\TASK-019",

@@ -41,6 +41,7 @@ it('checks in the exact inactive production preflight without a credential value
     max_dispatches: 1,
     dispatcher: 'codex',
     approval_policy: 'on-request',
+    codex_version: 'codex-cli 0.150.1',
     workflow_mutation_adapter: false,
     credential_environment_variable: 'GH_TOKEN',
   });
@@ -56,6 +57,7 @@ it.each([
   ['max_dispatches', 2],
   ['dispatcher', 'deterministic-fake'],
   ['approval_policy', 'never'],
+  ['codex_version', 'codex-cli 0.149.0'],
   ['workflow_mutation_adapter', true],
   ['timeout_ms', 120_001],
 ] as const)('fails closed when %s drifts from the exact pilot', async (field, value) => {
