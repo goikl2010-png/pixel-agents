@@ -10,6 +10,7 @@
 
 import * as path from 'path';
 
+import { launchProductionCompanyRunner } from '../../scripts/company-runner-production-launcher.js';
 import {
   discoverActionableTask,
   EMPLOYEE_IDENTITIES,
@@ -73,6 +74,9 @@ export interface CliArgs {
   runnerDryRun?: boolean;
   runnerStatus?: boolean;
   runnerFake?: boolean;
+  runnerProductionLaunch?: boolean;
+  runnerPreflightConfig?: string;
+  runnerAuthorization?: string;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -174,6 +178,14 @@ export function parseArgs(argv: string[]): CliArgs {
       args.runnerStatus = true;
     } else if (argv[i] === '--runner-fake') {
       args.runnerFake = true;
+    } else if (argv[i] === '--runner-production-launch') {
+      args.runnerProductionLaunch = true;
+    } else if (argv[i] === '--runner-preflight-config') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-preflight-config.');
+      args.runnerPreflightConfig = argv[++i];
+    } else if (argv[i] === '--runner-authorization') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-authorization.');
+      args.runnerAuthorization = argv[++i];
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
@@ -200,6 +212,12 @@ Options:
   --runner-dry-run       Compute decision without agent/task/GitHub mutation
   --runner-status        Print machine-readable Runner status without dispatch
   --runner-fake          Use deterministic fake adapter (test/rehearsal only)
+  --runner-production-launch
+                         Run the exact authorized TASK-019 production entry point once
+  --runner-preflight-config <path>
+                         Canonical TASK-019 preflight package
+  --runner-authorization <path>
+                         Exact fresh Goi RED authorization artifact
   --help                Show this help message`);
       process.exit(0);
     }
@@ -208,12 +226,38 @@ Options:
   return args;
 }
 
+export function validateRunnerCliMode(args: CliArgs): void {
+  const conflictingLegacyOptions = [
+    args.runnerTask !== undefined ? '--runner-task' : undefined,
+    args.runnerStateDirectory !== undefined ? '--runner-state-directory' : undefined,
+    args.runnerDryRun ? '--runner-dry-run' : undefined,
+    args.runnerStatus ? '--runner-status' : undefined,
+    args.runnerFake ? '--runner-fake' : undefined,
+  ].filter((option): option is string => option !== undefined);
+
+  if (args.runnerProductionLaunch && conflictingLegacyOptions.length > 0) {
+    throw new CliArgsError(
+      `--runner-production-launch cannot be combined with legacy Runner options: ${conflictingLegacyOptions.join(', ')}.`,
+    );
+  }
+
+  if (
+    !args.runnerProductionLaunch &&
+    (args.runnerPreflightConfig !== undefined || args.runnerAuthorization !== undefined)
+  ) {
+    throw new CliArgsError(
+      '--runner-preflight-config and --runner-authorization require --runner-production-launch.',
+    );
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   let args: CliArgs;
   try {
     args = parseArgs(process.argv.slice(2));
+    validateRunnerCliMode(args);
   } catch (err) {
     console.error(`[Pixel Agents] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -299,6 +343,30 @@ async function main(): Promise<void> {
           ),
         });
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (args.runnerProductionLaunch) {
+    if (!args.runnerPreflightConfig || !args.runnerAuthorization || !args.companyTasksRoot) {
+      console.error(
+        '[Pixel Agents] production launch requires --company-tasks-root, --runner-preflight-config, and --runner-authorization.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const result = await launchProductionCompanyRunner({
+        companyRoot: args.companyTasksRoot,
+        configPath: args.runnerPreflightConfig,
+        authorizationPath: args.runnerAuthorization,
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      console.error(
+        `[Pixel Agents] ${error instanceof Error ? error.message : 'Production launch failed closed.'}`,
+      );
+      process.exitCode = 1;
+    }
     return;
   }
 
