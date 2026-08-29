@@ -78,7 +78,9 @@ it('fixes the exact direct Codex argument order and deterministic configuration 
     '--cd',
   ]);
   expect(config.argument_template).not.toContain('--approve-for-me');
-  expect(task019ConfigurationSha256(config)).toMatch(/^[0-9a-f]{64}$/);
+  expect(task019ConfigurationSha256(config)).toBe(
+    '67031756b6b363802b6c6fe2af7c43c56744b4d91bb2b3bebd4ed2ca17622229',
+  );
   expect(task019ConfigurationSha256(config)).toBe(task019ConfigurationSha256(await readConfig()));
 });
 
