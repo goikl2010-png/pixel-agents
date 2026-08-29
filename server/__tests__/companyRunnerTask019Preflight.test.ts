@@ -41,6 +41,7 @@ it('checks in the exact inactive production preflight without a credential value
     max_dispatches: 1,
     dispatcher: 'codex',
     approval_policy: 'on-request',
+    codex_version: 'codex-cli 0.150.1',
     workflow_mutation_adapter: false,
     credential_environment_variable: 'GH_TOKEN',
   });
@@ -56,6 +57,7 @@ it.each([
   ['max_dispatches', 2],
   ['dispatcher', 'deterministic-fake'],
   ['approval_policy', 'never'],
+  ['codex_version', 'codex-cli 0.149.0'],
   ['workflow_mutation_adapter', true],
   ['timeout_ms', 120_001],
 ] as const)('fails closed when %s drifts from the exact pilot', async (field, value) => {
@@ -76,7 +78,9 @@ it('fixes the exact direct Codex argument order and deterministic configuration 
     '--cd',
   ]);
   expect(config.argument_template).not.toContain('--approve-for-me');
-  expect(task019ConfigurationSha256(config)).toMatch(/^[0-9a-f]{64}$/);
+  expect(task019ConfigurationSha256(config)).toBe(
+    '67031756b6b363802b6c6fe2af7c43c56744b4d91bb2b3bebd4ed2ca17622229',
+  );
   expect(task019ConfigurationSha256(config)).toBe(task019ConfigurationSha256(await readConfig()));
 });
 

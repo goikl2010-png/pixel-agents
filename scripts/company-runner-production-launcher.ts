@@ -31,7 +31,7 @@ export interface GoiRedLaunchAuthorization {
   configuration_sha256: string;
   runner_commit: string;
   executable: string;
-  codex_version: 'codex-cli 0.149.0';
+  codex_version: 'codex-cli 0.150.1';
   approved_working_root: string;
   output_schema: string;
   argument_template: string[];

@@ -18,7 +18,7 @@ export interface Task019PreflightConfig {
   dispatcher: 'codex';
   approval_policy: 'on-request';
   executable: string;
-  codex_version: 'codex-cli 0.149.0';
+  codex_version: 'codex-cli 0.150.1';
   approved_working_root: string;
   output_schema: string;
   state_directory: string;
@@ -95,7 +95,7 @@ export function validateTask019PreflightConfig(value: unknown): Task019Preflight
     config.max_dispatches !== 1 ||
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
-    config.codex_version !== 'codex-cli 0.149.0' ||
+    config.codex_version !== 'codex-cli 0.150.1' ||
     config.workflow_mutation_adapter !== false ||
     config.credential_environment_variable !== 'GH_TOKEN' ||
     config.required_global_capability !== '--ask-for-approval on-request'
