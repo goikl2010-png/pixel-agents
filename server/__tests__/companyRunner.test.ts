@@ -208,6 +208,78 @@ it('fails closed before dispatch for missing evidence or unavailable/conflicting
   expect(fake.calls).toHaveLength(0);
 });
 
+it('recognizes one complete current-head inline implementation record at READY_FOR_QA', async () => {
+  const { root, task } = await fixture('READY_FOR_QA', 'Pixel');
+  const head = 'a'.repeat(40);
+  const bytes = (await readFile(task, 'utf8')).replace(
+    '- **Evidence link:** `documentation/qa/report.md`',
+    `## Implementation Evidence
+
+- **Change set/version:** Initial bounded delivery
+- **Feature branch:** task/TASK-016-company-runner-v1
+- **Commit SHA:** ${head}
+- **Pull Request URL/number:** PR #23
+- **Summary:** Implemented the exact bounded scope.
+- **Files changed:** one.md; two.md
+- **Decisions and assumptions:** Preserved all governed boundaries.
+- **Tests added or changed:** Focused deterministic checks.
+- **Verification and results:** Focused checks passed.
+- **Known risks or limitations:** None beyond the governed lifecycle.
+- **Evidence links:** Issue #22; PR #23`,
+  );
+  await writeFile(task, bytes);
+
+  const facts = await reconcileRunnerFacts(
+    root,
+    await readRunnerTask(root, 'TASK-016'),
+    githubResolver,
+  );
+
+  expect(facts.evidence).toHaveLength(1);
+  expect(facts.evidence[0]).toMatchObject({
+    path: 'tasks/review/task.md#implementation-evidence',
+  });
+  expect(facts.evidence[0].bytes).toContain(`**Commit SHA:** ${head}`);
+});
+
+it.each([
+  ['missing verification', '- **Verification and results:** Focused checks passed.'],
+  ['pending verification', 'Focused checks passed.'],
+  ['stale commit', 'a'.repeat(40)],
+  ['ambiguous section', '## Implementation Evidence'],
+])('rejects %s inline implementation evidence at READY_FOR_QA', async (_name, target) => {
+  const { root, task } = await fixture('READY_FOR_QA', 'Pixel');
+  const complete = (await readFile(task, 'utf8')).replace(
+    '- **Evidence link:** `documentation/qa/report.md`',
+    `## Implementation Evidence
+
+- **Change set/version:** Initial bounded delivery
+- **Feature branch:** task/TASK-016-company-runner-v1
+- **Commit SHA:** ${'a'.repeat(40)}
+- **Pull Request URL/number:** PR #23
+- **Summary:** Implemented the exact bounded scope.
+- **Files changed:** one.md; two.md
+- **Decisions and assumptions:** Preserved all governed boundaries.
+- **Tests added or changed:** Focused deterministic checks.
+- **Verification and results:** Focused checks passed.
+- **Known risks or limitations:** None beyond the governed lifecycle.
+- **Evidence links:** Issue #22; PR #23`,
+  );
+  const malformed =
+    _name === 'missing verification'
+      ? complete.replace(target, '')
+      : _name === 'pending verification'
+        ? complete.replace(target, 'Pending')
+        : _name === 'stale commit'
+          ? complete.replace(target, 'b'.repeat(40))
+          : `${complete}\n\n${target}\n`;
+  await writeFile(task, malformed);
+
+  await expect(
+    reconcileRunnerFacts(root, await readRunnerTask(root, 'TASK-016'), githubResolver),
+  ).rejects.toThrow('Required evidence is absent');
+});
+
 it('resolves typed live GitHub facts through fixed gh API paths without disclosing credentials', async () => {
   const { root } = await fixture();
   const task = await readRunnerTask(root, 'TASK-016');

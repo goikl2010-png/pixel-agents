@@ -103,6 +103,23 @@ export interface GitHubFacts {
   base: string;
   branch: string;
   head: string;
+  scope?: GitHubPullRequestScope;
+}
+
+export interface GitHubPullRequestFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+}
+
+export interface GitHubPullRequestScope {
+  commits: number;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  files: GitHubPullRequestFile[];
 }
 
 export interface GitHubFactResolver {
@@ -115,6 +132,7 @@ export interface GhCliResolverOptions {
   approvedIdentity?: string;
   parentEnvironment?: NodeJS.ProcessEnv;
   run?: typeof runGhJson;
+  includePullRequestScope?: boolean;
 }
 
 export interface GovernedGitHubPreflightOptions {
@@ -183,7 +201,7 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       },
       signal,
     );
-    const [issue, pr] = await Promise.all([
+    const [issue, pr, files] = await Promise.all([
       run(
         executable,
         ['api', `repos/${expected.repository}/issues/${expected.issue}`],
@@ -196,12 +214,24 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
         environment,
         signal,
       ),
+      this.options.includePullRequestScope
+        ? run(
+            executable,
+            ['api', `repos/${expected.repository}/pulls/${expected.pr}/files?per_page=100`],
+            environment,
+            signal,
+          )
+        : undefined,
     ]);
     const issueObject = issue as { state?: string };
     const prObject = pr as {
       state?: string;
       draft?: boolean;
       merged_at?: string | null;
+      commits?: number;
+      additions?: number;
+      deletions?: number;
+      changed_files?: number;
       base?: { ref?: string };
       head?: { ref?: string; sha?: string };
     };
@@ -214,6 +244,64 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       !/^[0-9a-f]{40}$/i.test(prObject.head.sha ?? '')
     )
       throw new Error('GitHub returned malformed or incomplete action-required facts.');
+    let scope: GitHubPullRequestScope | undefined;
+    if (this.options.includePullRequestScope) {
+      const fileObjects = files as Array<{
+        filename?: unknown;
+        status?: unknown;
+        additions?: unknown;
+        deletions?: unknown;
+        changes?: unknown;
+      }>;
+      if (
+        !Array.isArray(fileObjects) ||
+        !Number.isInteger(prObject.commits) ||
+        (prObject.commits ?? 0) < 1 ||
+        !Number.isInteger(prObject.additions) ||
+        (prObject.additions ?? -1) < 0 ||
+        !Number.isInteger(prObject.deletions) ||
+        (prObject.deletions ?? -1) < 0 ||
+        !Number.isInteger(prObject.changed_files) ||
+        prObject.changed_files !== fileObjects.length ||
+        fileObjects.some(
+          (file) =>
+            typeof file.filename !== 'string' ||
+            file.filename.length === 0 ||
+            file.filename !== file.filename.trim() ||
+            typeof file.status !== 'string' ||
+            file.status.length === 0 ||
+            !Number.isInteger(file.additions) ||
+            (file.additions as number) < 0 ||
+            !Number.isInteger(file.deletions) ||
+            (file.deletions as number) < 0 ||
+            !Number.isInteger(file.changes) ||
+            file.changes !== (file.additions as number) + (file.deletions as number),
+        )
+      )
+        throw new Error('GitHub returned malformed or incomplete Pull Request scope facts.');
+      const normalized = fileObjects
+        .map((file) => ({
+          path: file.filename as string,
+          status: file.status as string,
+          additions: file.additions as number,
+          deletions: file.deletions as number,
+          changes: file.changes as number,
+        }))
+        .sort((left, right) => left.path.localeCompare(right.path));
+      if (
+        new Set(normalized.map((file) => file.path)).size !== normalized.length ||
+        normalized.reduce((sum, file) => sum + file.additions, 0) !== prObject.additions ||
+        normalized.reduce((sum, file) => sum + file.deletions, 0) !== prObject.deletions
+      )
+        throw new Error('GitHub Pull Request scope facts are ambiguous or inconsistent.');
+      scope = {
+        commits: prObject.commits!,
+        additions: prObject.additions!,
+        deletions: prObject.deletions!,
+        changedFiles: prObject.changed_files!,
+        files: normalized,
+      };
+    }
     return {
       repository: expected.repository,
       issue: expected.issue,
@@ -224,6 +312,7 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       base: prObject.base.ref,
       branch: prObject.head.ref,
       head: prObject.head.sha!,
+      ...(scope ? { scope } : {}),
     };
   }
 }
@@ -677,6 +766,56 @@ function field(markdown: string, name: string): string[] {
   ].map((match) => match[1].trim().replace(/^`|`$/g, ''));
 }
 
+function inlineImplementationEvidence(
+  companyRoot: string,
+  task: RunnerTask,
+): VerifiedEvidence | undefined {
+  if (task.state !== 'READY_FOR_QA' || task.evidence.length > 0) return undefined;
+  const headings = [...task.bytes.matchAll(/^## Implementation Evidence\s*$/gim)];
+  if (headings.length !== 1 || headings[0].index === undefined) return undefined;
+  const start = headings[0].index;
+  const remaining = task.bytes.slice(start + headings[0][0].length);
+  const nextHeading = remaining.search(/^##\s/m);
+  const bytes = `${headings[0][0]}${
+    nextHeading === -1 ? remaining : remaining.slice(0, nextHeading)
+  }`.trim();
+  const oneComplete = (name: string): string | undefined => {
+    const values = field(bytes, name);
+    if (values.length !== 1 || /^(?:pending|n\/a)(?:\b|\s|$)/i.test(values[0])) return undefined;
+    return values[0];
+  };
+  const required = [
+    'Change set/version',
+    'Feature branch',
+    'Commit SHA',
+    'Pull Request URL/number',
+    'Summary',
+    'Files changed',
+    'Decisions and assumptions',
+    'Tests added or changed',
+    'Verification and results',
+    'Known risks or limitations',
+    'Evidence links',
+  ] as const;
+  const values = Object.fromEntries(required.map((name) => [name, oneComplete(name)]));
+  if (Object.values(values).some((value) => value === undefined)) return undefined;
+  const delivery = taskDeliveryFields(task);
+  const evidencePr = values['Pull Request URL/number']!.match(/#(\d+)/)?.[1];
+  const evidenceCommit = values['Commit SHA']!.match(/\b[0-9a-f]{40}\b/i)?.[0];
+  if (
+    values['Feature branch'] !== delivery.branch ||
+    evidencePr === undefined ||
+    Number(evidencePr) !== delivery.pr ||
+    evidenceCommit?.toLowerCase() !== delivery.head?.toLowerCase()
+  )
+    return undefined;
+  return {
+    path: `${path.relative(path.resolve(companyRoot), task.path).replace(/\\/g, '/')}#implementation-evidence`,
+    sha256: sha256(bytes),
+    bytes,
+  };
+}
+
 export async function readRunnerTask(companyRoot: string, taskId: string): Promise<RunnerTask> {
   if (!/^TASK-\d+$/.test(taskId)) throw new Error('Task ID must use TASK-<digits>.');
   const taskRoot = path.resolve(companyRoot, 'tasks');
@@ -761,17 +900,22 @@ function canonicalFactBytes(facts?: ReconciledFacts): string {
 function taskDeliveryFields(task: RunnerTask): Partial<GitHubFacts> {
   const oneOptional = (name: string): string | undefined => {
     const values = field(task.bytes, name).filter((value) => !/pending|n\/a/i.test(value));
-    if (values.length > 1) throw new Error(`Conflicting ${name} fields.`);
-    return values[0];
+    const unique = [...new Set(values)];
+    if (unique.length > 1) throw new Error(`Conflicting ${name} fields.`);
+    return unique[0];
   };
-  const numberFrom = (value?: string): number | undefined => {
-    const match = value?.match(/#?(\d+)/);
-    return match ? Number(match[1]) : undefined;
+  const oneNumber = (name: string): number | undefined => {
+    const values = field(task.bytes, name).filter((value) => !/pending|n\/a/i.test(value));
+    const numbers = values.map((value) => value.match(/#?(\d+)/)?.[1]);
+    if (numbers.some((value) => value === undefined)) throw new Error(`Malformed ${name} field.`);
+    const unique = [...new Set(numbers.map(Number))];
+    if (unique.length > 1) throw new Error(`Conflicting ${name} fields.`);
+    return unique[0];
   };
   return {
     repository: oneOptional('Repository'),
-    issue: numberFrom(oneOptional('GitHub Issue URL/number')),
-    pr: numberFrom(oneOptional('Pull Request URL/number')),
+    issue: oneNumber('GitHub Issue URL/number'),
+    pr: oneNumber('Pull Request URL/number'),
     base: oneOptional('Base branch'),
     branch: oneOptional('Feature branch'),
     head: oneOptional('Current PR head commit'),
@@ -803,6 +947,8 @@ export async function reconcileRunnerFacts(
     evidence.push({ path: normalized, sha256: sha256(bytes), bytes });
   }
   evidence.sort((a, b) => a.path.localeCompare(b.path));
+  const inline = inlineImplementationEvidence(companyRoot, task);
+  if (inline) evidence.push(inline);
   if (task.state !== 'BACKLOG' && task.state !== 'COMPLETED' && evidence.length === 0)
     throw new Error(`Required evidence is absent for ${task.state}.`);
 

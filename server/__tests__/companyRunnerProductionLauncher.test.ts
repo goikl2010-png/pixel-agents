@@ -11,6 +11,7 @@ import {
   EXACT_EXPECTED_EFFECTS,
   EXACT_ROLLBACK,
   EXACT_STOP_CONDITIONS,
+  expectedEffectsForAuthorization,
   launchProductionCompanyRunner,
   type ProductionLaunchOptions,
 } from '../../scripts/company-runner-production-launcher.js';
@@ -49,13 +50,22 @@ interface Fixture {
   authorization: Record<string, unknown>;
   stateDirectory: string;
   stopFile: string;
+  taskPath: string;
+}
+
+interface FixtureOptions {
+  state?: 'READY_FOR_QA' | 'QA' | 'QA_RETEST' | 'READY_FOR_REVIEW' | 'REVIEW' | 'APPROVED';
+  owner?: 'Pixel' | 'Atlas' | 'Alex';
+  draft?: boolean;
+  inlineEvidence?: boolean;
+  head?: string;
 }
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
   const root = await mkdtemp(path.join(tmpdir(), 'task-022-launcher-'));
   temporaryDirectories.push(root);
   await Promise.all(
@@ -70,24 +80,55 @@ async function fixture(): Promise<Fixture> {
   );
   await mkdir(path.dirname(outputSchemaPath), { recursive: true });
   await writeFile(outputSchemaPath, await readFile(canonicalOutputSchemaPath, 'utf8'));
+  await writeFile(
+    path.join(path.dirname(outputSchemaPath), 'company-runner-approval-v1.schema.json'),
+    await readFile(
+      path.join(repositoryRoot, 'docs/schemas/company-runner-approval-v1.schema.json'),
+      'utf8',
+    ),
+  );
   const taskPath = path.join(root, 'tasks', 'review', 'task-020.md');
+  const state = options.state ?? 'READY_FOR_QA';
+  const owner = options.owner ?? 'Pixel';
+  const head = options.head ?? TARGET_HEAD;
+  const linkedEvidence = options.inlineEvidence
+    ? ''
+    : '- **Evidence link:** `documentation/qa/task-020-fixture.md`';
+  const inlineEvidence = options.inlineEvidence
+    ? `## Implementation Evidence
+
+- **Change set/version:** Fixture delivery
+- **Feature branch:** task/TASK-020-reconcile-company-runner-roadmap
+- **Commit SHA:** ${head}
+- **Pull Request URL/number:** PR #4
+- **Summary:** Complete fixture implementation.
+- **Files changed:** COMPANY-MEMORY.md; memory/project-history.md; projects/codex-pixel-agents-integration/PROJECT.md
+- **Decisions and assumptions:** Exact fixture scope only.
+- **Tests added or changed:** Focused fixture checks.
+- **Verification and results:** All focused checks passed.
+- **Known risks or limitations:** None
+- **Evidence links:** Issue #3; PR #4
+`
+    : '';
   const taskBytes = `# TASK-020
 - **Task ID:** TASK-020
-- **Owner:** Pixel
-- **Current state:** READY_FOR_QA
+- **Owner:** ${owner}
+- **Current state:** ${state}
 - **Resume state (required only when BLOCKED):** None
 - **Repository:** goikl2010-png/AI-Company
 - **GitHub Issue URL/number:** Issue #3
 - **Pull Request URL/number:** PR #4
 - **Base branch:** main
 - **Feature branch:** task/TASK-020-reconcile-company-runner-roadmap
-- **Current PR head commit:** ${TARGET_HEAD}
-- **Evidence link:** \`documentation/qa/task-020-fixture.md\`
+- **Current PR head commit:** ${head}
+${linkedEvidence}
+
+${inlineEvidence}
 `;
   await writeFile(taskPath, taskBytes);
   await writeFile(
     path.join(root, 'documentation', 'qa', 'task-020-fixture.md'),
-    `Disposable launcher fixture only; no TASK-020 QA. Head ${TARGET_HEAD}.\n`,
+    `Pixel PASSED fixture evidence for ${head}.\n`,
   );
   const canonical = JSON.parse(await readFile(canonicalConfigPath, 'utf8')) as Record<
     string,
@@ -98,7 +139,8 @@ async function fixture(): Promise<Fixture> {
   const config: Record<string, unknown> = {
     ...canonical,
     target_path: taskPath,
-    target_sha256: sha256(taskBytes),
+    target_sha256:
+      state === 'READY_FOR_QA' && owner === 'Pixel' ? sha256(taskBytes) : canonical.target_sha256,
     target_head: TARGET_HEAD,
     executable: path.join(root, 'codex.cmd'),
     approved_working_root: root,
@@ -126,19 +168,48 @@ async function fixture(): Promise<Fixture> {
     authorization: 'RED',
     authorized_by: 'Goi',
     task_id: 'TASK-020',
-    target_state: 'READY_FOR_QA',
-    target_owner: 'Pixel',
-    target_sha256: config.target_sha256,
+    target_state: state,
+    target_owner: owner,
+    target_sha256: sha256(taskBytes),
     github: {
       repository: config.target_repository,
       issue: config.target_issue,
       issueState: 'OPEN',
       pr: config.target_pr,
       prState: 'OPEN',
-      draft: false,
+      draft: options.draft ?? false,
       base: 'main',
       branch: 'task/TASK-020-reconcile-company-runner-roadmap',
-      head: config.target_head,
+      head,
+      scope: {
+        commits: 1,
+        additions: 83,
+        deletions: 0,
+        changedFiles: 3,
+        files: [
+          {
+            path: 'COMPANY-MEMORY.md',
+            status: 'modified',
+            additions: 30,
+            deletions: 0,
+            changes: 30,
+          },
+          {
+            path: 'memory/project-history.md',
+            status: 'modified',
+            additions: 28,
+            deletions: 0,
+            changes: 28,
+          },
+          {
+            path: 'projects/codex-pixel-agents-integration/PROJECT.md',
+            status: 'added',
+            additions: 25,
+            deletions: 0,
+            changes: 25,
+          },
+        ],
+      },
     },
     configuration_sha256: sha256(`${JSON.stringify(config, null, 2)}\n`),
     runner_commit: RUNNER_HEAD,
@@ -149,7 +220,7 @@ async function fixture(): Promise<Fixture> {
     argument_template: config.argument_template,
     credential_environment_variable: 'GH_TOKEN',
     max_dispatches: 1,
-    expected_effects: [...EXACT_EXPECTED_EFFECTS],
+    expected_effects: [...expectedEffectsForAuthorization(state, owner)],
     rollback: EXACT_ROLLBACK,
     timeout_ms: config.timeout_ms,
     stop_conditions: [...EXACT_STOP_CONDITIONS],
@@ -164,6 +235,7 @@ async function fixture(): Promise<Fixture> {
     authorization,
     stateDirectory,
     stopFile,
+    taskPath,
   };
 }
 
@@ -196,16 +268,26 @@ function seams(candidate: Fixture, counters: { github: number; spawn: number }) 
       if (args[1] === 'user') return { login: 'goikl2010-png' };
       if (args[1] === 'repos/goikl2010-png/AI-Company')
         return { full_name: 'goikl2010-png/AI-Company' };
+      if (args[1].includes('/files?'))
+        return (
+          candidate.authorization.github as {
+            scope: { files: Array<Record<string, unknown>> };
+          }
+        ).scope.files.map(({ path: filename, ...file }) => ({ filename, ...file }));
       return args[1].includes('/issues/')
         ? { state: 'open' }
         : {
             state: 'open',
-            draft: false,
+            draft: (candidate.authorization.github as { draft: boolean }).draft,
             merged_at: null,
+            commits: 1,
+            additions: 83,
+            deletions: 0,
+            changed_files: 3,
             base: { ref: 'main' },
             head: {
               ref: 'task/TASK-020-reconcile-company-runner-roadmap',
-              sha: TARGET_HEAD,
+              sha: (candidate.authorization.github as { head: string }).head,
             },
           };
     },
@@ -373,7 +455,7 @@ describe('production Company Runner launcher', () => {
     if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
     const result = await launchProductionCompanyRunner(options);
     expect(result.outcome).toBe('DISPATCHED');
-    expect(counters.github).toBe(8);
+    expect(counters.github).toBe(10);
     expect(counters.spawn).toBe(1);
     expect(JSON.stringify(result)).not.toContain(SENTINEL);
     const source = await readFile(
@@ -382,6 +464,189 @@ describe('production Company Runner launcher', () => {
     );
     expect(source).not.toMatch(/dispatcher\??\s*:/);
     expect(source).not.toContain('FakeAgentDispatcher');
+  });
+
+  it.each([
+    ['READY_FOR_QA', 'Pixel'],
+    ['QA', 'Pixel'],
+    ['QA_RETEST', 'Pixel'],
+    ['READY_FOR_REVIEW', 'Atlas'],
+    ['REVIEW', 'Atlas'],
+  ] as const)('permits exactly one fresh %s / %s dispatch', async (state, owner) => {
+    const candidate = await fixture({
+      state,
+      owner,
+      ...(state === 'QA_RETEST' ? { head: 'c'.repeat(40) } : {}),
+    });
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+
+    await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
+      outcome: 'DISPATCHED',
+      decision: { state, owner, action_kind: 'DISPATCH_ROLE', classification: 'GREEN' },
+    });
+    if (state !== 'READY_FOR_QA')
+      expect(candidate.authorization.target_sha256).not.toBe(candidate.config.target_sha256);
+    expect(counters).toEqual({ github: 10, spawn: 1 });
+  });
+
+  it('accepts an exactly authorized live draft and complete inline TASK-020 evidence', async () => {
+    const candidate = await fixture({ draft: true, inlineEvidence: true });
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+
+    await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
+      outcome: 'DISPATCHED',
+      decision: { github: { draft: true } },
+    });
+    expect(counters).toEqual({ github: 10, spawn: 1 });
+  });
+
+  it('emits the exact APPROVED / Alex RED stop package without launching an agent', async () => {
+    const candidate = await fixture({ state: 'APPROVED', owner: 'Alex', draft: true });
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+
+    await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
+      outcome: 'APPROVAL_REQUIRED',
+      decision: {
+        state: 'APPROVED',
+        owner: 'Alex',
+        action_kind: 'AWAIT_ALEX_DECISION',
+        classification: 'RED',
+      },
+      approval: {
+        agent: 'Alex',
+        workflow_state: 'APPROVED',
+        requested_action: 'AWAIT_ALEX_DECISION',
+        risk_approval_class: 'RED',
+      },
+    });
+    expect(counters).toEqual({ github: 10, spawn: 0 });
+  });
+
+  it.each([
+    ['CHANGES_REQUIRED', 'Nova'],
+    ['BLOCKED', 'Alex'],
+    ['COMPLETED', 'Alex'],
+    ['QA', 'Atlas'],
+    ['REVIEW', 'Pixel'],
+    ['APPROVED', 'Pixel'],
+  ])('rejects unauthorized or wrong-role %s / %s with zero launch', async (state, owner) => {
+    const candidate = await fixture();
+    await rewriteAuthorization(candidate, {
+      ...candidate.authorization,
+      target_state: state,
+      target_owner: owner,
+    });
+    const counters = { github: 0, spawn: 0 };
+
+    await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow();
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+  });
+
+  it('rejects stale state authorization before GitHub or process launch', async () => {
+    const candidate = await fixture({ state: 'QA', owner: 'Pixel' });
+    await rewriteAuthorization(candidate, {
+      ...candidate.authorization,
+      target_state: 'READY_FOR_QA',
+      expected_effects: [...expectedEffectsForAuthorization('READY_FOR_QA', 'Pixel')],
+    });
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+
+    await expect(launchProductionCompanyRunner(options)).rejects.toThrow(
+      /target identity|fingerprint/i,
+    );
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+  });
+
+  it.each([
+    [
+      'missing draft',
+      (github: Record<string, unknown>) => {
+        const { draft: _draft, ...withoutDraft } = github;
+        return withoutDraft;
+      },
+    ],
+    ['non-boolean draft', (github: Record<string, unknown>) => ({ ...github, draft: 'true' })],
+  ])('rejects %s before GitHub or process launch', async (_name, mutateGithub) => {
+    const candidate = await fixture();
+    await rewriteAuthorization(candidate, {
+      ...candidate.authorization,
+      github: mutateGithub(candidate.authorization.github as Record<string, unknown>),
+    });
+    const counters = { github: 0, spawn: 0 };
+
+    await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow();
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+  });
+
+  it.each(['draft', 'scope'] as const)(
+    'rejects missing live GitHub %s facts with zero launch',
+    async (missing) => {
+      const candidate = await fixture();
+      const counters = { github: 0, spawn: 0 };
+      const options = seams(candidate, counters);
+      const validRun = options.githubRun!;
+      options.githubRun = async (executable, args, environment, signal) => {
+        const result = await validRun(executable, args, environment, signal);
+        if (!args[1].includes('/pulls/') || args[1].includes('/files?'))
+          return missing === 'scope' && args[1].includes('/files?') ? [] : result;
+        if (missing === 'draft') {
+          const { draft: _draft, ...withoutDraft } = result as Record<string, unknown>;
+          return withoutDraft;
+        }
+        const { changed_files: _changedFiles, ...withoutScopeCount } = result as Record<
+          string,
+          unknown
+        >;
+        return withoutScopeCount;
+      };
+      if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+
+      await expect(launchProductionCompanyRunner(options)).rejects.toThrow('failed closed');
+      expect(counters.spawn).toBe(0);
+    },
+  );
+
+  it('rejects authorized draft drift against freshly fetched GitHub facts with zero launch', async () => {
+    const candidate = await fixture();
+    await rewriteAuthorization(candidate, {
+      ...candidate.authorization,
+      github: { ...(candidate.authorization.github as object), draft: true },
+    });
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+
+    await expect(launchProductionCompanyRunner(options)).rejects.toThrow('failed closed');
+    expect(counters.spawn).toBe(0);
+    expect(counters.github).toBeGreaterThan(0);
+  });
+
+  it('rejects authorized PR scope drift against freshly fetched facts with zero launch', async () => {
+    const candidate = await fixture();
+    const github = structuredClone(candidate.authorization.github as Record<string, unknown>);
+    const scope = github.scope as {
+      additions: number;
+      files: Array<{ additions: number; changes: number }>;
+    };
+    scope.additions++;
+    scope.files[0].additions++;
+    scope.files[0].changes++;
+    await rewriteAuthorization(candidate, { ...candidate.authorization, github });
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+
+    await expect(launchProductionCompanyRunner(options)).rejects.toThrow('failed closed');
+    expect(counters.spawn).toBe(0);
+    expect(counters.github).toBeGreaterThan(0);
   });
 
   it.each([

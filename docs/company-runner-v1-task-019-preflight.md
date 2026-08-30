@@ -27,3 +27,11 @@ Stop on any task/path/hash/PR/head/base/scope/state/owner drift; missing or ambi
 Timeout is 120 seconds. Alex owns rollback and the isolated state directory. Rollback terminates the bounded child, preserves audit/status/approval and ambiguity evidence, leaves authoritative task and GitHub facts unchanged, and revokes only an exposed ephemeral credential if necessary. Post-run reconciliation must record result, exact hashes, audit/status chain, dispatch/retry count, token/model accounting, lease/circuit/recovery state, external effects, stop/rollback actions, and redacted secret-scan outcome.
 
 A live dispatch requires fresh written Goi authorization naming the then-current target fingerprint, Runner commit, configuration hash, executable/capabilities, argument array, credential boundary, expected effects, rollback, timeout, and stop conditions. Approval of this Pull Request is not dispatch authorization.
+
+## TASK-025 compatibility contract
+
+The inactive JSON above remains the protected initial package; its canonical SHA-256 does not change. The `target_state`, `target_owner`, `target_sha256`, and `target_head` values identify the initial held TASK-020 target and must match the first `READY_FOR_QA / Pixel` authorization exactly. They are not reusable authorization for later states.
+
+A later production invocation is possible only with a new exact Goi RED authorization for the freshly reconciled TASK-020 bytes and GitHub facts. Only Pixel at `READY_FOR_QA`, `QA`, or `QA_RETEST` and Atlas at `READY_FOR_REVIEW` or `REVIEW` may dispatch once. `APPROVED / Alex` produces the owner-only RED stop package with zero launch. Every other state/owner pair produces zero launch. Draft PRs are neither inferred nor categorically bypassed: the authorization must contain a Boolean draft fact that exactly equals the freshly fetched PR fact.
+
+The unchanged TASK-020 inline `Implementation Evidence` section is accepted at `READY_FOR_QA` only when its required delivery fields are unique, complete, non-pending, and agree with the authoritative branch, PR, and current head. This compatibility does not add or fabricate an evidence link. Subsequent states retain the linked-evidence and current-head QA/review gates. Each authorization also pins the exact three-file TASK-020 PR scope and its fresh statistics; scope or fact drift stops before launch.

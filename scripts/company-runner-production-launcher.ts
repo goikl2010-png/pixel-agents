@@ -9,6 +9,7 @@ import {
   CodexAgentDispatcher,
   GhCliGitHubFactResolver,
   type GitHubFacts,
+  type GitHubPullRequestScope,
   readRunnerTask,
   runCompanyOnce,
   type RunOnceResult,
@@ -24,10 +25,10 @@ export interface GoiRedLaunchAuthorization {
   authorization: 'RED';
   authorized_by: 'Goi';
   task_id: 'TASK-020';
-  target_state: 'READY_FOR_QA';
-  target_owner: 'Pixel';
+  target_state: AuthorizedTargetState;
+  target_owner: AuthorizedTargetOwner;
   target_sha256: string;
-  github: GitHubFacts;
+  github: GitHubFacts & { scope: GitHubPullRequestScope };
   configuration_sha256: string;
   runner_commit: string;
   executable: string;
@@ -72,7 +73,12 @@ export interface SanitizedProductionLaunchResult {
   outcome: RunOnceResult['outcome'];
   decision: Omit<RunOnceResult['decision'], 'github'> & { github?: GitHubFacts };
   dispatch?: Omit<NonNullable<RunOnceResult['dispatch']>, 'output'>;
+  approval?: RunOnceResult['approval'];
 }
+
+type AuthorizedTargetState =
+  'READY_FOR_QA' | 'QA' | 'QA_RETEST' | 'READY_FOR_REVIEW' | 'REVIEW' | 'APPROVED';
+type AuthorizedTargetOwner = 'Pixel' | 'Atlas' | 'Alex';
 
 const GIT_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -109,11 +115,34 @@ const GITHUB_KEYS = [
   'base',
   'branch',
   'head',
+  'scope',
+] as const;
+const GITHUB_SCOPE_KEYS = ['commits', 'additions', 'deletions', 'changedFiles', 'files'] as const;
+const GITHUB_FILE_KEYS = ['path', 'status', 'additions', 'deletions', 'changes'] as const;
+const AUTHORIZED_TASK020_FILES = [
+  'COMPANY-MEMORY.md',
+  'memory/project-history.md',
+  'projects/codex-pixel-agents-integration/PROJECT.md',
 ] as const;
 export const EXACT_EXPECTED_EFFECTS = [
   'Dispatch Pixel exactly once for authorized TASK-020 QA at READY_FOR_QA.',
   'Permit only Pixel-owned TASK-020 QA evidence and legal task handoff updates.',
 ] as const;
+export function expectedEffectsForAuthorization(
+  state: AuthorizedTargetState,
+  owner: AuthorizedTargetOwner,
+): readonly string[] {
+  if (state === 'READY_FOR_QA' && owner === 'Pixel') return EXACT_EXPECTED_EFFECTS;
+  if (state === 'APPROVED' && owner === 'Alex')
+    return [
+      'Launch no agent for TASK-020 at APPROVED / Alex.',
+      'Emit only the exact owner/RED stop package; merge, closure, deployment, and completion remain forbidden.',
+    ];
+  return [
+    `Dispatch ${owner} exactly once for authorized TASK-020 ${state} role-owned work.`,
+    `Permit only ${owner}-owned TASK-020 evidence and legal task handoff updates from ${state}.`,
+  ];
+}
 export const EXACT_ROLLBACK =
   'Stop the one-shot Runner, preserve audit evidence, and do not redispatch after ambiguity.';
 export const EXACT_STOP_CONDITIONS = [
@@ -169,17 +198,38 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
     throw new Error('Production launch authorization GitHub facts are malformed.');
   if (!hasExactKeys(record.github as Record<string, unknown>, GITHUB_KEYS))
     throw new Error('Production launch authorization GitHub facts have missing or unknown fields.');
+  const github = record.github as Record<string, unknown>;
+  if (!github.scope || typeof github.scope !== 'object' || Array.isArray(github.scope))
+    throw new Error('Production launch authorization GitHub scope is malformed.');
+  const scope = github.scope as Record<string, unknown>;
+  if (!hasExactKeys(scope, GITHUB_SCOPE_KEYS) || !Array.isArray(scope.files))
+    throw new Error('Production launch authorization GitHub scope has missing or unknown fields.');
+  if (
+    scope.files.some(
+      (file) =>
+        !file ||
+        typeof file !== 'object' ||
+        Array.isArray(file) ||
+        !hasExactKeys(file as Record<string, unknown>, GITHUB_FILE_KEYS),
+    )
+  )
+    throw new Error('Production launch authorization GitHub file scope is malformed.');
   const credentialSafeCopy = { ...record, credential_environment_variable: undefined };
   if (containsCredentialContent(credentialSafeCopy))
     throw new Error('Production launch authorization contains credential-like content.');
   const auth = record as unknown as Partial<GoiRedLaunchAuthorization>;
+  const authorizedPair =
+    (['READY_FOR_QA', 'QA', 'QA_RETEST'].includes(auth.target_state ?? '') &&
+      auth.target_owner === 'Pixel') ||
+    (['READY_FOR_REVIEW', 'REVIEW'].includes(auth.target_state ?? '') &&
+      auth.target_owner === 'Atlas') ||
+    (auth.target_state === 'APPROVED' && auth.target_owner === 'Alex');
   if (
     auth.schema_version !== '1' ||
     auth.authorization !== 'RED' ||
     auth.authorized_by !== 'Goi' ||
     auth.task_id !== 'TASK-020' ||
-    auth.target_state !== 'READY_FOR_QA' ||
-    auth.target_owner !== 'Pixel' ||
+    !authorizedPair ||
     auth.credential_environment_variable !== 'GH_TOKEN' ||
     auth.max_dispatches !== 1 ||
     !auth.github ||
@@ -197,6 +247,35 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
     (auth.timeout_ms ?? 0) > 120_000
   )
     throw new Error('Production launch authorization violates the exact RED contract.');
+  const exactScope = auth.github.scope;
+  if (
+    typeof auth.github.draft !== 'boolean' ||
+    !Number.isInteger(exactScope.commits) ||
+    exactScope.commits < 1 ||
+    !Number.isInteger(exactScope.additions) ||
+    exactScope.additions < 0 ||
+    !Number.isInteger(exactScope.deletions) ||
+    exactScope.deletions < 0 ||
+    !Number.isInteger(exactScope.changedFiles) ||
+    exactScope.changedFiles !== exactScope.files.length ||
+    exactScope.files.some(
+      (file) =>
+        typeof file.path !== 'string' ||
+        !file.path ||
+        file.path !== file.path.trim() ||
+        typeof file.status !== 'string' ||
+        !file.status ||
+        !Number.isInteger(file.additions) ||
+        file.additions < 0 ||
+        !Number.isInteger(file.deletions) ||
+        file.deletions < 0 ||
+        !Number.isInteger(file.changes) ||
+        file.changes !== file.additions + file.deletions,
+    ) ||
+    exactScope.files.reduce((sum, file) => sum + file.additions, 0) !== exactScope.additions ||
+    exactScope.files.reduce((sum, file) => sum + file.deletions, 0) !== exactScope.deletions
+  )
+    throw new Error('Production launch authorization GitHub scope violates the exact contract.');
 }
 
 function hashTaskBytes(bytes: string): string {
@@ -210,8 +289,12 @@ function assertExactAuthorization(
   const configurationSha256 = task019ConfigurationSha256(config);
   if (auth.configuration_sha256 !== configurationSha256)
     throw new Error('Production launch authorization does not cover the canonical configuration.');
-  if (auth.target_sha256 !== config.target_sha256)
-    throw new Error('Production launch authorization target fingerprint drifted.');
+  if (
+    auth.target_state === config.target_state &&
+    auth.target_owner === config.target_owner &&
+    auth.target_sha256 !== config.target_sha256
+  )
+    throw new Error('Initial production authorization target fingerprint drifted.');
   const exact: Array<[string, unknown, unknown]> = [
     ['executable', auth.executable, config.executable],
     ['Codex version', auth.codex_version, config.codex_version],
@@ -229,7 +312,10 @@ function assertExactAuthorization(
     if (actual !== expected) throw new Error(`Production authorization ${name} drifted.`);
   if (JSON.stringify(auth.argument_template) !== JSON.stringify(config.argument_template))
     throw new Error('Production authorization argument template drifted.');
-  if (JSON.stringify(auth.expected_effects) !== JSON.stringify(EXACT_EXPECTED_EFFECTS))
+  if (
+    JSON.stringify(auth.expected_effects) !==
+    JSON.stringify(expectedEffectsForAuthorization(auth.target_state, auth.target_owner))
+  )
     throw new Error('Production authorization expected effects drifted.');
   if (auth.rollback !== EXACT_ROLLBACK)
     throw new Error('Production authorization rollback drifted.');
@@ -241,12 +327,21 @@ function assertExactAuthorization(
     auth.github.pr !== config.target_pr ||
     auth.github.base !== 'main' ||
     auth.github.branch !== 'task/TASK-020-reconcile-company-runner-roadmap' ||
-    auth.github.head !== config.target_head ||
     auth.github.issueState !== 'OPEN' ||
-    auth.github.prState !== 'OPEN' ||
-    auth.github.draft
+    auth.github.prState !== 'OPEN'
   )
     throw new Error('Production authorization GitHub facts drifted.');
+  if (
+    auth.target_state === config.target_state &&
+    auth.target_owner === config.target_owner &&
+    auth.github.head !== config.target_head
+  )
+    throw new Error('Initial production authorization GitHub head drifted.');
+  if (
+    JSON.stringify(auth.github.scope.files.map((file) => file.path).sort()) !==
+    JSON.stringify([...AUTHORIZED_TASK020_FILES].sort())
+  )
+    throw new Error('Production authorization Pull Request scope drifted.');
 }
 
 async function probeRunnerCheckout(checkoutRoot: string): Promise<RunnerCheckoutProvenance> {
@@ -307,6 +402,7 @@ function sanitizeResult(result: RunOnceResult): SanitizedProductionLaunchResult 
     outcome: result.outcome,
     decision: { ...decision, ...(github ? { github } : {}) },
     ...(dispatch ? { dispatch } : {}),
+    ...(result.approval ? { approval: result.approval } : {}),
   };
 }
 
@@ -342,16 +438,17 @@ export async function launchProductionCompanyRunner(
 
   const task = await readRunnerTask(options.companyRoot, config.task_id);
   if (
-    task.state !== config.target_state ||
-    task.owner !== config.target_owner ||
+    task.state !== authorization.target_state ||
+    task.owner !== authorization.target_owner ||
     path.resolve(task.path) !== path.resolve(config.target_path) ||
-    hashTaskBytes(task.bytes) !== config.target_sha256
+    hashTaskBytes(task.bytes) !== authorization.target_sha256
   )
     throw new Error('Production target identity or fingerprint drifted.');
 
   const githubResolver = new GhCliGitHubFactResolver({
     credentialEnvironmentVariable: config.credential_environment_variable,
     parentEnvironment: options.parentEnvironment,
+    includePullRequestScope: true,
     ...(options.githubRun ? { run: options.githubRun } : {}),
   });
   const guardedResolver = {
