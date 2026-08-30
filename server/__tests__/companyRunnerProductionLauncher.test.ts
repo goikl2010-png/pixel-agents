@@ -556,8 +556,10 @@ describe('production Company Runner launcher', () => {
       expected_effects: [...expectedEffectsForAuthorization('READY_FOR_QA', 'Pixel')],
     });
     const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
 
-    await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
+    await expect(launchProductionCompanyRunner(options)).rejects.toThrow(
       /target identity|fingerprint/i,
     );
     expect(counters).toEqual({ github: 0, spawn: 0 });
