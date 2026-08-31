@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { createHash } from 'crypto';
-import { readFile } from 'fs/promises';
+import { access, readFile } from 'fs/promises';
 import * as path from 'path';
 import { promisify } from 'util';
 
@@ -154,6 +154,48 @@ const CREDENTIAL_CONTENT =
   /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|bearer\s+\S+|-----BEGIN [^-]*PRIVATE KEY-----|(?:password|secret|token|private[_ -]?key)\s*[:=]\s*\S+)/i;
 const execFileAsync = promisify(execFile);
 const runnerCheckoutRoot = path.resolve(__dirname, '..');
+const GOVERNANCE_INTEGRITY_TIMEOUT_MS = 30_000;
+
+async function enforceSharedGovernanceIntegrityGate(
+  companyRoot: string,
+  config: Task019PreflightConfig,
+): Promise<void> {
+  const verifierPath = path.resolve(companyRoot, 'scripts', 'Test-GovernanceIntegrity.ps1');
+  const manifestPath = path.resolve(companyRoot, 'config', 'governance-integrity.json');
+  try {
+    await Promise.all([access(verifierPath), access(manifestPath)]);
+    await execFileAsync(
+      process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        verifierPath,
+        '-ManifestPath',
+        manifestPath,
+        '-Role',
+        config.target_owner,
+        '-Operation',
+        'Admission',
+        '-TaskId',
+        config.task_id,
+        '-WorktreePath',
+        runnerCheckoutRoot,
+        '-Consumer',
+        'CompanyRunner',
+      ],
+      {
+        cwd: companyRoot,
+        timeout: GOVERNANCE_INTEGRITY_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    );
+  } catch {
+    throw new Error('Shared governance integrity gate failed closed.');
+  }
+}
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   return Object.keys(value).sort().join('\n') === [...expected].sort().join('\n');
@@ -414,6 +456,7 @@ export async function launchProductionCompanyRunner(
   options: ProductionLaunchOptions,
 ): Promise<SanitizedProductionLaunchResult> {
   const config = validateTask019PreflightConfig(await readJson(options.configPath));
+  await enforceSharedGovernanceIntegrityGate(options.companyRoot, config);
   const authorization = await readJson(options.authorizationPath);
   assertAuthorization(authorization);
   assertExactAuthorization(config, authorization);

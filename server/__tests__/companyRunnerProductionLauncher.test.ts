@@ -5,7 +5,43 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { hostname, tmpdir } from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const governanceGateProcess = vi.hoisted(() => ({
+  calls: [] as Array<{
+    executable: string;
+    args: readonly string[];
+    options: { cwd?: string; timeout?: number; windowsHide?: boolean };
+  }>,
+  error: null as Error | null,
+  onInvoke: undefined as (() => void) | undefined,
+}));
+
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    execFile: (
+      executable: string,
+      args: readonly string[],
+      options: { cwd?: string; timeout?: number; windowsHide?: boolean },
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      if (executable !== 'powershell.exe' && executable !== 'pwsh')
+        return actual.execFile(executable, [...args], options, callback);
+      governanceGateProcess.calls.push({ executable, args: [...args], options });
+      governanceGateProcess.onInvoke?.();
+      queueMicrotask(() =>
+        callback(
+          governanceGateProcess.error,
+          governanceGateProcess.error ? '' : 'GOVERNANCE INTEGRITY: PASSED',
+          governanceGateProcess.error?.message ?? '',
+        ),
+      );
+      return undefined;
+    },
+  };
+});
 
 import {
   EXACT_EXPECTED_EFFECTS,
@@ -73,6 +109,17 @@ async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
       mkdir(path.join(root, 'tasks', store), { recursive: true }),
     ),
   );
+  await Promise.all([
+    mkdir(path.join(root, 'scripts'), { recursive: true }),
+    mkdir(path.join(root, 'config'), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(
+      path.join(root, 'scripts', 'Test-GovernanceIntegrity.ps1'),
+      '# Test-only shared-gate path sentinel.\n',
+    ),
+    writeFile(path.join(root, 'config', 'governance-integrity.json'), '{}\n'),
+  ]);
   await mkdir(path.join(root, 'documentation', 'qa'), { recursive: true });
   const outputSchemaPath = path.join(
     root,
@@ -339,6 +386,12 @@ async function stoppedByCanonicalWindowsPathGate(
   return true;
 }
 
+beforeEach(() => {
+  governanceGateProcess.calls.splice(0);
+  governanceGateProcess.error = null;
+  governanceGateProcess.onInvoke = undefined;
+});
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -445,9 +498,101 @@ describe('production Company Runner CLI mode boundary', () => {
       expect(result.stderr).toContain('require --runner-production-launch');
     }
   }, 15_000);
+
+  it('routes production CLI execution through the single shared-gate-protected launcher', async () => {
+    const [cliSource, launcherSource] = await Promise.all([
+      readFile(path.join(repositoryRoot, 'server/src/cli.ts'), 'utf8'),
+      readFile(path.join(repositoryRoot, 'scripts/company-runner-production-launcher.ts'), 'utf8'),
+    ]);
+    const productionCall = cliSource.indexOf('await launchProductionCompanyRunner({');
+    expect(productionCall).toBeGreaterThan(0);
+    expect(cliSource.indexOf('runCompanyOnce({', productionCall)).toBe(-1);
+    const gateCall = launcherSource.indexOf(
+      'await enforceSharedGovernanceIntegrityGate(options.companyRoot, config);',
+    );
+    const authorizationRead = launcherSource.indexOf(
+      'const authorization = await readJson(options.authorizationPath);',
+    );
+    expect(gateCall).toBeGreaterThan(0);
+    expect(gateCall).toBeLessThan(authorizationRead);
+  });
 });
 
 describe('production Company Runner launcher', () => {
+  it('invokes the existing shared gate exactly once before governed execution', async () => {
+    const candidate = await fixture();
+    const counters = { github: 0, spawn: 0 };
+    governanceGateProcess.onInvoke = () => {
+      expect(counters).toEqual({ github: 0, spawn: 0 });
+      expect(existsSync(candidate.stateDirectory)).toBe(false);
+    };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) {
+      expect(governanceGateProcess.calls).toHaveLength(1);
+      return;
+    }
+    await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
+      outcome: 'DISPATCHED',
+    });
+    expect(governanceGateProcess.calls).toEqual([
+      {
+        executable: process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
+        args: [
+          '-NoProfile',
+          '-NonInteractive',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          path.join(candidate.root, 'scripts', 'Test-GovernanceIntegrity.ps1'),
+          '-ManifestPath',
+          path.join(candidate.root, 'config', 'governance-integrity.json'),
+          '-Role',
+          'Pixel',
+          '-Operation',
+          'Admission',
+          '-TaskId',
+          'TASK-020',
+          '-WorktreePath',
+          repositoryRoot,
+          '-Consumer',
+          'CompanyRunner',
+        ],
+        options: { cwd: candidate.root, timeout: 30_000, windowsHide: true },
+      },
+    ]);
+  });
+
+  it.each([
+    ['nonzero verifier result', Object.assign(new Error('gate exited 1'), { code: 1 })],
+    ['verifier exception', new Error('gate process failed')],
+    ['verifier timeout', Object.assign(new Error('gate timed out'), { killed: true })],
+  ])('fails closed on %s before any governed execution', async (_label, gateError) => {
+    const candidate = await fixture();
+    const counters = { github: 0, spawn: 0 };
+    governanceGateProcess.error = gateError;
+    await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
+      'Shared governance integrity gate failed closed.',
+    );
+    expect(governanceGateProcess.calls).toHaveLength(1);
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+    expect(existsSync(candidate.stateDirectory)).toBe(false);
+  });
+
+  it.each([
+    ['verifier', 'scripts/Test-GovernanceIntegrity.ps1'],
+    ['manifest', 'config/governance-integrity.json'],
+  ])('fails closed when the shared %s is missing', async (_label, relativePath) => {
+    const candidate = await fixture();
+    await rm(path.join(candidate.root, ...relativePath.split('/')));
+    const counters = { github: 0, spawn: 0 };
+    await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
+      'Shared governance integrity gate failed closed.',
+    );
+    expect(governanceGateProcess.calls).toHaveLength(0);
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+    expect(existsSync(candidate.stateDirectory)).toBe(false);
+  });
+
   it('constructs the real dispatcher and reaches exactly one governed fake process spawn', async () => {
     const candidate = await fixture();
     const counters = { github: 0, spawn: 0 };
