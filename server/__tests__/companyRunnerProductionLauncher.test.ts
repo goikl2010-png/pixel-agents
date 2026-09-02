@@ -290,6 +290,44 @@ async function rewriteAuthorization(candidate: Fixture, authorization: unknown):
   await writeFile(candidate.authorizationPath, `${JSON.stringify(authorization, null, 2)}\n`);
 }
 
+async function useCanonicalWindowsPathsForSharedGate(candidate: Fixture): Promise<void> {
+  if (process.platform === 'win32') return;
+  const root = 'C:\\task-026-gate-fixture';
+  const outputSchema = `${root}\\docs\\schemas\\company-runner-codex-output-v1.schema.json`;
+  Object.assign(candidate.config, {
+    target_path: `${root}\\tasks\\review\\task-020.md`,
+    executable: `${root}\\codex.cmd`,
+    approved_working_root: root,
+    output_schema: outputSchema,
+    state_directory: `${root}\\.runner`,
+    stop_file: `${root}\\.runner\\STOP`,
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      root,
+      '--output-schema',
+      outputSchema,
+      '<JSON_HANDOFF_PACKET>',
+    ],
+  });
+  Object.assign(candidate.authorization, {
+    configuration_sha256: sha256(`${JSON.stringify(candidate.config, null, 2)}\n`),
+    executable: candidate.config.executable,
+    approved_working_root: candidate.config.approved_working_root,
+    output_schema: candidate.config.output_schema,
+    argument_template: candidate.config.argument_template,
+  });
+  await Promise.all([
+    writeFile(candidate.configPath, `${JSON.stringify(candidate.config, null, 2)}\n`),
+    rewriteAuthorization(candidate, candidate.authorization),
+  ]);
+}
+
 function seams(candidate: Fixture, counters: { github: number; spawn: number }) {
   const options: ProductionLaunchOptions = {
     configPath: candidate.configPath,
@@ -521,19 +559,21 @@ describe('production Company Runner CLI mode boundary', () => {
 describe('production Company Runner launcher', () => {
   it('invokes the existing shared gate exactly once before governed execution', async () => {
     const candidate = await fixture();
+    await useCanonicalWindowsPathsForSharedGate(candidate);
     const counters = { github: 0, spawn: 0 };
     governanceGateProcess.onInvoke = () => {
       expect(counters).toEqual({ github: 0, spawn: 0 });
       expect(existsSync(candidate.stateDirectory)).toBe(false);
     };
     const options = seams(candidate, counters);
-    if (await stoppedByCanonicalWindowsPathGate(options, counters)) {
-      expect(governanceGateProcess.calls).toHaveLength(1);
-      return;
-    }
-    await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
-      outcome: 'DISPATCHED',
-    });
+    if (process.platform === 'win32')
+      await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
+        outcome: 'DISPATCHED',
+      });
+    else
+      await expect(launchProductionCompanyRunner(options)).rejects.toThrow(
+        'Production Company Runner root drifted from the canonical package.',
+      );
     expect(governanceGateProcess.calls).toEqual([
       {
         executable: process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
@@ -568,6 +608,7 @@ describe('production Company Runner launcher', () => {
     ['verifier timeout', Object.assign(new Error('gate timed out'), { killed: true })],
   ])('fails closed on %s before any governed execution', async (_label, gateError) => {
     const candidate = await fixture();
+    await useCanonicalWindowsPathsForSharedGate(candidate);
     const counters = { github: 0, spawn: 0 };
     governanceGateProcess.error = gateError;
     await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
@@ -583,6 +624,7 @@ describe('production Company Runner launcher', () => {
     ['manifest', 'config/governance-integrity.json'],
   ])('fails closed when the shared %s is missing', async (_label, relativePath) => {
     const candidate = await fixture();
+    await useCanonicalWindowsPathsForSharedGate(candidate);
     await rm(path.join(candidate.root, ...relativePath.split('/')));
     const counters = { github: 0, spawn: 0 };
     await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
