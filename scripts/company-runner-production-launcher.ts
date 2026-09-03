@@ -350,6 +350,7 @@ function assertExactAuthorization(
   )
     throw new Error('Initial production authorization target fingerprint drifted.');
   const exact: Array<[string, unknown, unknown]> = [
+    ['Runner commit', auth.runner_commit, config.runner_commit],
     ['executable', auth.executable, config.executable],
     ['Codex version', auth.codex_version, config.codex_version],
     ['approved working root', auth.approved_working_root, config.approved_working_root],

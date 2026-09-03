@@ -185,6 +185,7 @@ ${inlineEvidence}
   const stopFile = path.join(stateDirectory, 'STOP');
   const config: Record<string, unknown> = {
     ...canonical,
+    runner_commit: RUNNER_HEAD,
     target_path: taskPath,
     target_sha256:
       state === 'READY_FOR_QA' && owner === 'Pixel' ? sha256(taskBytes) : canonical.target_sha256,
@@ -1104,5 +1105,92 @@ it('schema-v2 validates managed Codex authentication read-only before target or 
     }),
   ).rejects.toThrow('Managed-context Codex authentication is unavailable');
   expect(authenticationProbes).toBe(1);
+  expect(counters).toEqual({ github: 0, spawn: 0 });
+});
+
+it('schema-v2 rejects configuration Runner commit drift before probes, target, GitHub, or dispatch', async () => {
+  const candidate = await fixture();
+  Object.assign(candidate.config, {
+    schema_version: '2',
+    task_id: 'TASK-028',
+    codex_version: 'codex-cli 0.152.1',
+    target_path: 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-028.md',
+    executable: 'C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd',
+    approved_working_root: 'C:\\AI-Company',
+    output_schema:
+      'C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json',
+    state_directory: 'C:\\AI-Company\\.company-runner-state\\TASK-028',
+    stop_file: 'C:\\AI-Company\\.company-runner-state\\TASK-028\\STOP',
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      'C:\\AI-Company',
+      '--output-schema',
+      'C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json',
+      '<JSON_HANDOFF_PACKET>',
+    ],
+  });
+  Object.assign(candidate.authorization, {
+    schema_version: '2',
+    task_id: 'TASK-028',
+    codex_version: 'codex-cli 0.152.1',
+    expected_effects: [
+      'Dispatch Pixel exactly once for authorized TASK-028 QA at READY_FOR_QA.',
+      'Permit only Pixel-owned TASK-028 QA evidence and legal task handoff updates.',
+    ],
+    executable: candidate.config.executable,
+    approved_working_root: candidate.config.approved_working_root,
+    output_schema: candidate.config.output_schema,
+    argument_template: candidate.config.argument_template,
+  });
+  const github = candidate.authorization.github as {
+    branch: string;
+    scope: { additions: number; changedFiles: number; files: Array<Record<string, unknown>> };
+  };
+  github.branch = 'task/TASK-028-runner-v1-activation-canary';
+  github.scope.files = [
+    {
+      path: 'documentation/runner-v1-first-activation-canary.md',
+      status: 'added',
+      additions: 1,
+      deletions: 0,
+      changes: 1,
+    },
+  ];
+  github.scope.additions = 1;
+  github.scope.changedFiles = 1;
+
+  candidate.config.runner_commit = 'd'.repeat(40);
+  candidate.authorization.configuration_sha256 = sha256(
+    `${JSON.stringify(candidate.config, null, 2)}\n`,
+  );
+  await Promise.all([
+    writeFile(candidate.configPath, `${JSON.stringify(candidate.config, null, 2)}\n`),
+    rewriteAuthorization(candidate, candidate.authorization),
+  ]);
+
+  let versionProbes = 0;
+  let authenticationProbes = 0;
+  const counters = { github: 0, spawn: 0 };
+  const options = seams(candidate, counters);
+  options.versionProbe = async () => {
+    versionProbes++;
+    return 'codex-cli 0.152.1';
+  };
+  options.codexAuthenticationProbe = async () => {
+    authenticationProbes++;
+    return 'Logged in using managed authentication';
+  };
+
+  await expect(launchProductionCompanyRunner(options)).rejects.toThrow(
+    'Production authorization Runner commit drifted.',
+  );
+  expect(versionProbes).toBe(0);
+  expect(authenticationProbes).toBe(0);
   expect(counters).toEqual({ github: 0, spawn: 0 });
 });
