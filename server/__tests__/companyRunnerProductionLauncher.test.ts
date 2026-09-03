@@ -1030,6 +1030,26 @@ it('schema-v2 validates managed Codex authentication read-only before target or 
     schema_version: '2',
     task_id: 'TASK-028',
     codex_version: 'codex-cli 0.152.1',
+    target_path: 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-028.md',
+    executable: 'C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd',
+    approved_working_root: 'C:\\AI-Company',
+    output_schema:
+      'C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json',
+    state_directory: 'C:\\AI-Company\\.company-runner-state\\TASK-028',
+    stop_file: 'C:\\AI-Company\\.company-runner-state\\TASK-028\\STOP',
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      'C:\\AI-Company',
+      '--output-schema',
+      'C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json',
+      '<JSON_HANDOFF_PACKET>',
+    ],
   });
   Object.assign(candidate.authorization, {
     schema_version: '2',
@@ -1039,6 +1059,10 @@ it('schema-v2 validates managed Codex authentication read-only before target or 
       'Dispatch Pixel exactly once for authorized TASK-028 QA at READY_FOR_QA.',
       'Permit only Pixel-owned TASK-028 QA evidence and legal task handoff updates.',
     ],
+    executable: candidate.config.executable,
+    approved_working_root: candidate.config.approved_working_root,
+    output_schema: candidate.config.output_schema,
+    argument_template: candidate.config.argument_template,
   });
   const github = candidate.authorization.github as {
     branch: string;

@@ -180,9 +180,7 @@ export function validateControlledActivationConfig(value: unknown): ControlledAc
     config.schema_version !== '2' ||
     config.active !== false ||
     config.mode !== 'run-once' ||
-    typeof config.task_id !== 'string' ||
-    !/^TASK-\d{3,}$/.test(config.task_id) ||
-    config.task_id === 'TASK-020' ||
+    config.task_id !== 'TASK-028' ||
     config.target_repository !== 'goikl2010-png/AI-Company' ||
     !Number.isInteger(config.target_issue) ||
     (config.target_issue as number) < 1 ||
@@ -190,6 +188,9 @@ export function validateControlledActivationConfig(value: unknown): ControlledAc
     (config.target_pr as number) < 1 ||
     config.target_state !== 'READY_FOR_QA' ||
     config.target_owner !== 'Pixel' ||
+    config.target_path !== 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-028.md' ||
+    config.state_directory !== 'C:\\AI-Company\\.company-runner-state\\TASK-028' ||
+    config.stop_file !== 'C:\\AI-Company\\.company-runner-state\\TASK-028\\STOP' ||
     config.max_dispatches !== 1 ||
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||

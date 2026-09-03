@@ -497,8 +497,6 @@ export async function launchProductionCompanyRunner(
   assertAuthorization(authorization);
   assertExactAuthorization(config, authorization);
   if (config.active) throw new Error('Production configuration must remain inactive.');
-  if (path.resolve(options.companyRoot) !== path.resolve(config.approved_working_root))
-    throw new Error('Production Company Runner root drifted from the canonical package.');
 
   const provenance = await (options.checkoutProbe ?? probeRunnerCheckout)(runnerCheckoutRoot);
   assertRunnerCheckout(provenance, authorization);
@@ -521,6 +519,8 @@ export async function launchProductionCompanyRunner(
     if (!/^Logged in(?:\s|$)/i.test(authenticationStatus.trim()))
       throw new Error('Managed-context Codex authentication is unavailable.');
   }
+  if (path.resolve(options.companyRoot) !== path.resolve(config.approved_working_root))
+    throw new Error('Production Company Runner root drifted from the canonical package.');
 
   const task = await readRunnerTask(options.companyRoot, config.task_id);
   if (

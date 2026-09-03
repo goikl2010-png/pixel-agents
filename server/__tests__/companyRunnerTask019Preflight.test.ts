@@ -214,6 +214,10 @@ it('accepts one exact schema-v2 non-TASK-020 canary and pins current Codex', asy
   expect(productionConfigurationSha256(config)).toMatch(/^[0-9a-f]{64}$/);
   for (const candidate of [
     { ...config, task_id: 'TASK-020' },
+    { ...config, task_id: 'TASK-029' },
+    { ...config, target_path: `${root}\\tasks\\review\\codex-pixel-agents-029.md` },
+    { ...config, state_directory: `${root}\\.company-runner-state\\TASK-029` },
+    { ...config, stop_file: `${root}\\.company-runner-state\\TASK-029\\STOP` },
     { ...config, codex_version: 'codex-cli 0.150.1' },
     { ...config, timeout_ms: 119999 },
     { ...config, max_dispatches: 2 },
