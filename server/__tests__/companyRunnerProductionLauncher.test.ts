@@ -1023,3 +1023,62 @@ describe('production Company Runner launcher', () => {
     expect(counters.spawn).toBe(1);
   });
 });
+
+it('schema-v2 validates managed Codex authentication read-only before target or dispatch', async () => {
+  const candidate = await fixture();
+  Object.assign(candidate.config, {
+    schema_version: '2',
+    task_id: 'TASK-028',
+    codex_version: 'codex-cli 0.152.1',
+  });
+  Object.assign(candidate.authorization, {
+    schema_version: '2',
+    task_id: 'TASK-028',
+    codex_version: 'codex-cli 0.152.1',
+    expected_effects: [
+      'Dispatch Pixel exactly once for authorized TASK-028 QA at READY_FOR_QA.',
+      'Permit only Pixel-owned TASK-028 QA evidence and legal task handoff updates.',
+    ],
+  });
+  const github = candidate.authorization.github as {
+    branch: string;
+    scope: { additions: number; changedFiles: number; files: Array<Record<string, unknown>> };
+  };
+  github.branch = 'task/TASK-028-runner-v1-activation-canary';
+  github.scope.files = [
+    {
+      path: 'documentation/runner-v1-first-activation-canary.md',
+      status: 'added',
+      additions: 1,
+      deletions: 0,
+      changes: 1,
+    },
+  ];
+  github.scope.additions = 1;
+  github.scope.changedFiles = 1;
+  candidate.authorization.configuration_sha256 = sha256(
+    `${JSON.stringify(candidate.config, null, 2)}\n`,
+  );
+  await Promise.all([
+    writeFile(candidate.configPath, `${JSON.stringify(candidate.config, null, 2)}\n`),
+    rewriteAuthorization(candidate, candidate.authorization),
+  ]);
+  let authenticationProbes = 0;
+  const counters = { github: 0, spawn: 0 };
+  await expect(
+    launchProductionCompanyRunner({
+      ...seams(candidate, counters),
+      versionProbe: async (_executable, environment) => {
+        expect(environment.GH_TOKEN).toBeUndefined();
+        return 'codex-cli 0.152.1';
+      },
+      codexAuthenticationProbe: async (_executable, environment) => {
+        authenticationProbes++;
+        expect(environment.GH_TOKEN).toBeUndefined();
+        return 'Not logged in';
+      },
+    }),
+  ).rejects.toThrow('Managed-context Codex authentication is unavailable');
+  expect(authenticationProbes).toBe(1);
+  expect(counters).toEqual({ github: 0, spawn: 0 });
+});

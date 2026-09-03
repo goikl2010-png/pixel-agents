@@ -34,6 +34,42 @@ export interface Task019PreflightConfig {
   argument_template: string[];
 }
 
+export interface ControlledActivationConfig {
+  schema_version: '2';
+  active: false;
+  mode: 'run-once';
+  task_id: string;
+  target_repository: string;
+  target_issue: number;
+  target_pr: number;
+  target_state: 'READY_FOR_QA';
+  target_owner: 'Pixel';
+  target_path: string;
+  target_sha256: string;
+  target_head: string;
+  runner_commit: string;
+  max_dispatches: 1;
+  dispatcher: 'codex';
+  approval_policy: 'on-request';
+  executable: string;
+  codex_version: 'codex-cli 0.152.1';
+  approved_working_root: string;
+  output_schema: string;
+  state_directory: string;
+  stop_file: string;
+  timeout_ms: 120000;
+  lease_ttl_ms: 30000;
+  heartbeat_ms: 10000;
+  circuit_failure_threshold: 3;
+  workflow_mutation_adapter: false;
+  credential_environment_variable: 'GH_TOKEN';
+  required_global_capability: '--ask-for-approval on-request';
+  required_exec_capabilities: string[];
+  argument_template: string[];
+}
+
+export type ProductionRunnerConfig = Task019PreflightConfig | ControlledActivationConfig;
+
 const SHA256 = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}$/;
 const REQUIRED_EXEC = [
@@ -42,6 +78,145 @@ const REQUIRED_EXEC = [
   '--cd <DIR>',
   '--sandbox <SANDBOX_MODE>',
 ];
+
+const EXACT_KEYS = [
+  'schema_version',
+  'active',
+  'mode',
+  'task_id',
+  'target_repository',
+  'target_issue',
+  'target_pr',
+  'target_state',
+  'target_owner',
+  'target_path',
+  'target_sha256',
+  'target_head',
+  'runner_commit',
+  'max_dispatches',
+  'dispatcher',
+  'approval_policy',
+  'executable',
+  'codex_version',
+  'approved_working_root',
+  'output_schema',
+  'state_directory',
+  'stop_file',
+  'timeout_ms',
+  'lease_ttl_ms',
+  'heartbeat_ms',
+  'circuit_failure_threshold',
+  'workflow_mutation_adapter',
+  'credential_environment_variable',
+  'required_global_capability',
+  'required_exec_capabilities',
+  'argument_template',
+] as const;
+
+function assertCommonConfiguration(config: Record<string, unknown>, label: string): void {
+  if (Object.keys(config).sort().join('\n') !== [...EXACT_KEYS].sort().join('\n'))
+    throw new Error(`${label} configuration has missing or unknown fields.`);
+  for (const field of [
+    'target_path',
+    'executable',
+    'approved_working_root',
+    'output_schema',
+    'state_directory',
+    'stop_file',
+  ] as const) {
+    if (typeof config[field] !== 'string' || !/^[A-Za-z]:\\/.test(config[field] as string))
+      throw new Error(`${label} ${field} must be an absolute Windows path.`);
+  }
+  if (typeof config.target_sha256 !== 'string' || !SHA256.test(config.target_sha256))
+    throw new Error(`${label} target_sha256 must be a lowercase 64-character hash.`);
+  for (const field of ['target_head', 'runner_commit'] as const)
+    if (typeof config[field] !== 'string' || !GIT_SHA.test(config[field] as string))
+      throw new Error(`${label} ${field} must be a lowercase 40-character Git commit.`);
+  if (JSON.stringify(config.required_exec_capabilities) !== JSON.stringify(REQUIRED_EXEC))
+    throw new Error(`${label} exec capability contract is incomplete or reordered.`);
+  const expectedArguments = [
+    '--ask-for-approval',
+    'on-request',
+    'exec',
+    '--json',
+    '--sandbox',
+    'workspace-write',
+    '--cd',
+    config.approved_working_root,
+    '--output-schema',
+    config.output_schema,
+    '<JSON_HANDOFF_PACKET>',
+  ];
+  if (JSON.stringify(config.argument_template) !== JSON.stringify(expectedArguments))
+    throw new Error(`${label} Codex argument template is not the approved direct invocation.`);
+  if (
+    !Number.isInteger(config.timeout_ms) ||
+    (config.timeout_ms as number) < 1 ||
+    (config.timeout_ms as number) > 120_000 ||
+    !Number.isInteger(config.lease_ttl_ms) ||
+    (config.lease_ttl_ms as number) < 1_000 ||
+    (config.lease_ttl_ms as number) > 30_000 ||
+    !Number.isInteger(config.heartbeat_ms) ||
+    (config.heartbeat_ms as number) < 1 ||
+    (config.heartbeat_ms as number) > 10_000 ||
+    (config.heartbeat_ms as number) >= (config.lease_ttl_ms as number) ||
+    config.circuit_failure_threshold !== 3
+  )
+    throw new Error(`${label} preflight exceeds an existing hard process bound.`);
+  if (
+    /approve-for-me|dangerously-bypass|full-auto|danger-full-access|ask-for-approval[^]*never/i.test(
+      JSON.stringify(config),
+    )
+  )
+    throw new Error(`${label} preflight contains a forbidden approval or sandbox mode.`);
+}
+
+export function validateControlledActivationConfig(value: unknown): ControlledActivationConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Controlled activation configuration must be an object.');
+  const config = value as Record<string, unknown>;
+  assertCommonConfiguration(config, 'Controlled activation');
+  if (
+    config.schema_version !== '2' ||
+    config.active !== false ||
+    config.mode !== 'run-once' ||
+    typeof config.task_id !== 'string' ||
+    !/^TASK-\d{3,}$/.test(config.task_id) ||
+    config.task_id === 'TASK-020' ||
+    config.target_repository !== 'goikl2010-png/AI-Company' ||
+    !Number.isInteger(config.target_issue) ||
+    (config.target_issue as number) < 1 ||
+    !Number.isInteger(config.target_pr) ||
+    (config.target_pr as number) < 1 ||
+    config.target_state !== 'READY_FOR_QA' ||
+    config.target_owner !== 'Pixel' ||
+    config.max_dispatches !== 1 ||
+    config.dispatcher !== 'codex' ||
+    config.approval_policy !== 'on-request' ||
+    config.codex_version !== 'codex-cli 0.152.1' ||
+    config.timeout_ms !== 120_000 ||
+    config.lease_ttl_ms !== 30_000 ||
+    config.heartbeat_ms !== 10_000 ||
+    config.workflow_mutation_adapter !== false ||
+    config.credential_environment_variable !== 'GH_TOKEN' ||
+    config.required_global_capability !== '--ask-for-approval on-request'
+  )
+    throw new Error('Controlled activation configuration violates a fixed run-once invariant.');
+  return config as unknown as ControlledActivationConfig;
+}
+
+export function validateProductionRunnerConfig(value: unknown): ProductionRunnerConfig {
+  if ((value as { schema_version?: unknown } | null)?.schema_version === '2')
+    return validateControlledActivationConfig(value);
+  return validateTask019PreflightConfig(value);
+}
+
+export function productionConfigurationSha256(value: unknown): string {
+  const config = validateProductionRunnerConfig(value);
+  return createHash('sha256')
+    .update(`${JSON.stringify(config, null, 2)}\n`)
+    .digest('hex');
+}
 
 export function validateTask019PreflightConfig(value: unknown): Task019PreflightConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value))
