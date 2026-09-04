@@ -15,16 +15,16 @@ import {
   type RunOnceResult,
 } from '../server/src/companyRunner.js';
 import {
-  task019ConfigurationSha256,
-  type Task019PreflightConfig,
-  validateTask019PreflightConfig,
+  productionConfigurationSha256,
+  type ProductionRunnerConfig,
+  validateProductionRunnerConfig,
 } from './company-runner-task-019-preflight.js';
 
 export interface GoiRedLaunchAuthorization {
-  schema_version: '1';
+  schema_version: '1' | '2';
   authorization: 'RED';
   authorized_by: 'Goi';
-  task_id: 'TASK-020';
+  task_id: string;
   target_state: AuthorizedTargetState;
   target_owner: AuthorizedTargetOwner;
   target_sha256: string;
@@ -32,7 +32,7 @@ export interface GoiRedLaunchAuthorization {
   configuration_sha256: string;
   runner_commit: string;
   executable: string;
-  codex_version: 'codex-cli 0.150.1';
+  codex_version: 'codex-cli 0.150.1' | 'codex-cli 0.152.1';
   approved_working_root: string;
   output_schema: string;
   argument_template: string[];
@@ -56,6 +56,10 @@ export interface ProductionLaunchOptions {
     signal: AbortSignal,
   ) => Promise<unknown>;
   versionProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
+  codexAuthenticationProbe?: (
+    executable: string,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<string>;
   globalCapabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   capabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   spawnProcess?: ConstructorParameters<typeof CodexAgentDispatcher>[0]['spawnProcess'];
@@ -119,7 +123,7 @@ const GITHUB_KEYS = [
 ] as const;
 const GITHUB_SCOPE_KEYS = ['commits', 'additions', 'deletions', 'changedFiles', 'files'] as const;
 const GITHUB_FILE_KEYS = ['path', 'status', 'additions', 'deletions', 'changes'] as const;
-const AUTHORIZED_TASK020_FILES = [
+const HISTORICAL_TASK020_FILES = [
   'COMPANY-MEMORY.md',
   'memory/project-history.md',
   'projects/codex-pixel-agents-integration/PROJECT.md',
@@ -131,16 +135,21 @@ export const EXACT_EXPECTED_EFFECTS = [
 export function expectedEffectsForAuthorization(
   state: AuthorizedTargetState,
   owner: AuthorizedTargetOwner,
+  taskId = 'TASK-020',
 ): readonly string[] {
-  if (state === 'READY_FOR_QA' && owner === 'Pixel') return EXACT_EXPECTED_EFFECTS;
+  if (state === 'READY_FOR_QA' && owner === 'Pixel')
+    return [
+      `Dispatch Pixel exactly once for authorized ${taskId} QA at READY_FOR_QA.`,
+      `Permit only Pixel-owned ${taskId} QA evidence and legal task handoff updates.`,
+    ];
   if (state === 'APPROVED' && owner === 'Alex')
     return [
-      'Launch no agent for TASK-020 at APPROVED / Alex.',
+      `Launch no agent for ${taskId} at APPROVED / Alex.`,
       'Emit only the exact owner/RED stop package; merge, closure, deployment, and completion remain forbidden.',
     ];
   return [
-    `Dispatch ${owner} exactly once for authorized TASK-020 ${state} role-owned work.`,
-    `Permit only ${owner}-owned TASK-020 evidence and legal task handoff updates from ${state}.`,
+    `Dispatch ${owner} exactly once for authorized ${taskId} ${state} role-owned work.`,
+    `Permit only ${owner}-owned ${taskId} evidence and legal task handoff updates from ${state}.`,
   ];
 }
 export const EXACT_ROLLBACK =
@@ -158,7 +167,7 @@ const GOVERNANCE_INTEGRITY_TIMEOUT_MS = 30_000;
 
 async function enforceSharedGovernanceIntegrityGate(
   companyRoot: string,
-  config: Task019PreflightConfig,
+  config: ProductionRunnerConfig,
 ): Promise<void> {
   const verifierPath = path.resolve(companyRoot, 'scripts', 'Test-GovernanceIntegrity.ps1');
   const manifestPath = path.resolve(companyRoot, 'config', 'governance-integrity.json');
@@ -267,10 +276,11 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
       auth.target_owner === 'Atlas') ||
     (auth.target_state === 'APPROVED' && auth.target_owner === 'Alex');
   if (
-    auth.schema_version !== '1' ||
+    !['1', '2'].includes(auth.schema_version ?? '') ||
     auth.authorization !== 'RED' ||
     auth.authorized_by !== 'Goi' ||
-    auth.task_id !== 'TASK-020' ||
+    typeof auth.task_id !== 'string' ||
+    !/^TASK-\d{3,}$/.test(auth.task_id) ||
     !authorizedPair ||
     auth.credential_environment_variable !== 'GH_TOKEN' ||
     auth.max_dispatches !== 1 ||
@@ -325,12 +335,14 @@ function hashTaskBytes(bytes: string): string {
 }
 
 function assertExactAuthorization(
-  config: Task019PreflightConfig,
+  config: ProductionRunnerConfig,
   auth: GoiRedLaunchAuthorization,
 ): void {
-  const configurationSha256 = task019ConfigurationSha256(config);
+  const configurationSha256 = productionConfigurationSha256(config);
   if (auth.configuration_sha256 !== configurationSha256)
     throw new Error('Production launch authorization does not cover the canonical configuration.');
+  if (auth.schema_version !== config.schema_version || auth.task_id !== config.task_id)
+    throw new Error('Production authorization schema or task identity drifted.');
   if (
     auth.target_state === config.target_state &&
     auth.target_owner === config.target_owner &&
@@ -338,6 +350,7 @@ function assertExactAuthorization(
   )
     throw new Error('Initial production authorization target fingerprint drifted.');
   const exact: Array<[string, unknown, unknown]> = [
+    ['Runner commit', auth.runner_commit, config.runner_commit],
     ['executable', auth.executable, config.executable],
     ['Codex version', auth.codex_version, config.codex_version],
     ['approved working root', auth.approved_working_root, config.approved_working_root],
@@ -356,7 +369,9 @@ function assertExactAuthorization(
     throw new Error('Production authorization argument template drifted.');
   if (
     JSON.stringify(auth.expected_effects) !==
-    JSON.stringify(expectedEffectsForAuthorization(auth.target_state, auth.target_owner))
+    JSON.stringify(
+      expectedEffectsForAuthorization(auth.target_state, auth.target_owner, auth.task_id),
+    )
   )
     throw new Error('Production authorization expected effects drifted.');
   if (auth.rollback !== EXACT_ROLLBACK)
@@ -368,7 +383,10 @@ function assertExactAuthorization(
     auth.github.issue !== config.target_issue ||
     auth.github.pr !== config.target_pr ||
     auth.github.base !== 'main' ||
-    auth.github.branch !== 'task/TASK-020-reconcile-company-runner-roadmap' ||
+    auth.github.branch !==
+      (config.schema_version === '1'
+        ? 'task/TASK-020-reconcile-company-runner-roadmap'
+        : `task/${config.task_id}-runner-v1-activation-canary`) ||
     auth.github.issueState !== 'OPEN' ||
     auth.github.prState !== 'OPEN'
   )
@@ -379,9 +397,13 @@ function assertExactAuthorization(
     auth.github.head !== config.target_head
   )
     throw new Error('Initial production authorization GitHub head drifted.');
+  const authorizedPaths =
+    config.schema_version === '1'
+      ? [...HISTORICAL_TASK020_FILES]
+      : ['documentation/runner-v1-first-activation-canary.md'];
   if (
     JSON.stringify(auth.github.scope.files.map((file) => file.path).sort()) !==
-    JSON.stringify([...AUTHORIZED_TASK020_FILES].sort())
+    JSON.stringify(authorizedPaths.sort())
   )
     throw new Error('Production authorization Pull Request scope drifted.');
 }
@@ -434,6 +456,21 @@ async function probeProductionCodexVersion(
   }
 }
 
+async function probeManagedCodexAuthentication(
+  executable: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  try {
+    const result = await execFileAsync(executable, ['login', 'status'], {
+      env: environment,
+      windowsHide: true,
+    });
+    return result.stdout.trim();
+  } catch {
+    throw new Error('Managed-context Codex authentication is unavailable.');
+  }
+}
+
 function sanitizeResult(result: RunOnceResult): SanitizedProductionLaunchResult {
   const { github, ...decision } = result.decision;
   const dispatch = result.dispatch
@@ -455,14 +492,12 @@ function sanitizeResult(result: RunOnceResult): SanitizedProductionLaunchResult 
 export async function launchProductionCompanyRunner(
   options: ProductionLaunchOptions,
 ): Promise<SanitizedProductionLaunchResult> {
-  const config = validateTask019PreflightConfig(await readJson(options.configPath));
+  const config = validateProductionRunnerConfig(await readJson(options.configPath));
   await enforceSharedGovernanceIntegrityGate(options.companyRoot, config);
   const authorization = await readJson(options.authorizationPath);
   assertAuthorization(authorization);
   assertExactAuthorization(config, authorization);
-  if (config.active) throw new Error('TASK-019 configuration must remain inactive.');
-  if (path.resolve(options.companyRoot) !== path.resolve(config.approved_working_root))
-    throw new Error('Production Company Runner root drifted from the canonical package.');
+  if (config.active) throw new Error('Production configuration must remain inactive.');
 
   const provenance = await (options.checkoutProbe ?? probeRunnerCheckout)(runnerCheckoutRoot);
   assertRunnerCheckout(provenance, authorization);
@@ -478,6 +513,15 @@ export async function launchProductionCompanyRunner(
   );
   if (installedVersion !== authorization.codex_version || installedVersion !== config.codex_version)
     throw new Error('Installed Codex version differs from the exact authorization.');
+  if (config.schema_version === '2') {
+    const authenticationStatus = await (
+      options.codexAuthenticationProbe ?? probeManagedCodexAuthentication
+    )(config.executable, probeEnvironment);
+    if (!/^Logged in(?:\s|$)/i.test(authenticationStatus.trim()))
+      throw new Error('Managed-context Codex authentication is unavailable.');
+  }
+  if (path.resolve(options.companyRoot) !== path.resolve(config.approved_working_root))
+    throw new Error('Production Company Runner root drifted from the canonical package.');
 
   const task = await readRunnerTask(options.companyRoot, config.task_id);
   if (
