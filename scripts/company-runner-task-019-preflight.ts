@@ -68,7 +68,42 @@ export interface ControlledActivationConfig {
   argument_template: string[];
 }
 
-export type ProductionRunnerConfig = Task019PreflightConfig | ControlledActivationConfig;
+export interface SuccessorActivationConfig {
+  schema_version: '3';
+  active: false;
+  mode: 'run-once';
+  task_id: 'TASK-020';
+  target_repository: 'goikl2010-png/AI-Company';
+  target_issue: 3;
+  target_pr: 4;
+  target_state: 'READY_FOR_QA';
+  target_owner: 'Pixel';
+  target_path: string;
+  target_sha256: string;
+  target_head: string;
+  runner_commit: string;
+  max_dispatches: 1;
+  dispatcher: 'codex';
+  approval_policy: 'on-request';
+  executable: string;
+  codex_version: 'codex-cli 0.152.1';
+  approved_working_root: string;
+  output_schema: string;
+  state_directory: string;
+  stop_file: string;
+  timeout_ms: 120000;
+  lease_ttl_ms: 30000;
+  heartbeat_ms: 10000;
+  circuit_failure_threshold: 3;
+  workflow_mutation_adapter: false;
+  credential_environment_variable: 'GH_TOKEN';
+  required_global_capability: '--ask-for-approval on-request';
+  required_exec_capabilities: string[];
+  argument_template: string[];
+}
+
+export type ProductionRunnerConfig =
+  Task019PreflightConfig | ControlledActivationConfig | SuccessorActivationConfig;
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}$/;
@@ -206,9 +241,44 @@ export function validateControlledActivationConfig(value: unknown): ControlledAc
   return config as unknown as ControlledActivationConfig;
 }
 
+export function validateSuccessorActivationConfig(value: unknown): SuccessorActivationConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Successor activation configuration must be an object.');
+  const config = value as Record<string, unknown>;
+  assertCommonConfiguration(config, 'Successor activation');
+  if (
+    config.schema_version !== '3' ||
+    config.active !== false ||
+    config.mode !== 'run-once' ||
+    config.task_id !== 'TASK-020' ||
+    config.target_repository !== 'goikl2010-png/AI-Company' ||
+    config.target_issue !== 3 ||
+    config.target_pr !== 4 ||
+    config.target_state !== 'READY_FOR_QA' ||
+    config.target_owner !== 'Pixel' ||
+    config.target_path !== 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-020.md' ||
+    config.state_directory !== 'C:\\AI-Company\\.company-runner-state\\TASK-020' ||
+    config.stop_file !== 'C:\\AI-Company\\.company-runner-state\\TASK-020\\STOP' ||
+    config.max_dispatches !== 1 ||
+    config.dispatcher !== 'codex' ||
+    config.approval_policy !== 'on-request' ||
+    config.codex_version !== 'codex-cli 0.152.1' ||
+    config.timeout_ms !== 120_000 ||
+    config.lease_ttl_ms !== 30_000 ||
+    config.heartbeat_ms !== 10_000 ||
+    config.workflow_mutation_adapter !== false ||
+    config.credential_environment_variable !== 'GH_TOKEN' ||
+    config.required_global_capability !== '--ask-for-approval on-request'
+  )
+    throw new Error('Successor activation configuration violates a fixed run-once invariant.');
+  return config as unknown as SuccessorActivationConfig;
+}
+
 export function validateProductionRunnerConfig(value: unknown): ProductionRunnerConfig {
   if ((value as { schema_version?: unknown } | null)?.schema_version === '2')
     return validateControlledActivationConfig(value);
+  if ((value as { schema_version?: unknown } | null)?.schema_version === '3')
+    return validateSuccessorActivationConfig(value);
   return validateTask019PreflightConfig(value);
 }
 

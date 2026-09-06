@@ -1108,6 +1108,68 @@ it('schema-v2 validates managed Codex authentication read-only before target or 
   expect(counters).toEqual({ github: 0, spawn: 0 });
 });
 
+it('schema-v3 preserves governance-first managed authentication and zero launch', async () => {
+  const candidate = await fixture();
+  Object.assign(candidate.config, {
+    schema_version: '3',
+    codex_version: 'codex-cli 0.152.1',
+    target_path: 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-020.md',
+    executable: 'C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd',
+    approved_working_root: 'C:\\AI-Company',
+    output_schema:
+      'C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json',
+    state_directory: 'C:\\AI-Company\\.company-runner-state\\TASK-020',
+    stop_file: 'C:\\AI-Company\\.company-runner-state\\TASK-020\\STOP',
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      'C:\\AI-Company',
+      '--output-schema',
+      'C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json',
+      '<JSON_HANDOFF_PACKET>',
+    ],
+  });
+  Object.assign(candidate.authorization, {
+    schema_version: '3',
+    codex_version: 'codex-cli 0.152.1',
+    executable: candidate.config.executable,
+    approved_working_root: candidate.config.approved_working_root,
+    output_schema: candidate.config.output_schema,
+    argument_template: candidate.config.argument_template,
+  });
+  candidate.authorization.configuration_sha256 = sha256(
+    `${JSON.stringify(candidate.config, null, 2)}\n`,
+  );
+  await Promise.all([
+    writeFile(candidate.configPath, `${JSON.stringify(candidate.config, null, 2)}\n`),
+    rewriteAuthorization(candidate, candidate.authorization),
+  ]);
+  let authenticationProbes = 0;
+  const counters = { github: 0, spawn: 0 };
+  await expect(
+    launchProductionCompanyRunner({
+      ...seams(candidate, counters),
+      versionProbe: async (_executable, environment) => {
+        expect(environment.GH_TOKEN).toBeUndefined();
+        return 'codex-cli 0.152.1';
+      },
+      codexAuthenticationProbe: async (_executable, environment) => {
+        authenticationProbes++;
+        expect(environment.GH_TOKEN).toBeUndefined();
+        return 'Not logged in';
+      },
+    }),
+  ).rejects.toThrow('Managed-context Codex authentication is unavailable');
+  expect(governanceGateProcess.calls).toHaveLength(1);
+  expect(authenticationProbes).toBe(1);
+  expect(counters).toEqual({ github: 0, spawn: 0 });
+});
+
 it('schema-v2 rejects configuration Runner commit drift before probes, target, GitHub, or dispatch', async () => {
   const candidate = await fixture();
   Object.assign(candidate.config, {
