@@ -21,7 +21,7 @@ import {
 } from './company-runner-task-019-preflight.js';
 
 export interface GoiRedLaunchAuthorization {
-  schema_version: '1' | '2';
+  schema_version: '1' | '2' | '3';
   authorization: 'RED';
   authorized_by: 'Goi';
   task_id: string;
@@ -276,7 +276,7 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
       auth.target_owner === 'Atlas') ||
     (auth.target_state === 'APPROVED' && auth.target_owner === 'Alex');
   if (
-    !['1', '2'].includes(auth.schema_version ?? '') ||
+    !['1', '2', '3'].includes(auth.schema_version ?? '') ||
     auth.authorization !== 'RED' ||
     auth.authorized_by !== 'Goi' ||
     typeof auth.task_id !== 'string' ||
@@ -384,9 +384,11 @@ function assertExactAuthorization(
     auth.github.pr !== config.target_pr ||
     auth.github.base !== 'main' ||
     auth.github.branch !==
-      (config.schema_version === '1'
-        ? 'task/TASK-020-reconcile-company-runner-roadmap'
-        : `task/${config.task_id}-runner-v1-activation-canary`) ||
+      (config.schema_version === '2'
+        ? `task/${config.task_id}-runner-v1-activation-canary`
+        : config.schema_version === '3'
+          ? 'task/TASK-032-runner-v1-activation-canary-002'
+          : 'task/TASK-020-reconcile-company-runner-roadmap') ||
     auth.github.issueState !== 'OPEN' ||
     auth.github.prState !== 'OPEN'
   )
@@ -397,10 +399,23 @@ function assertExactAuthorization(
     auth.github.head !== config.target_head
   )
     throw new Error('Initial production authorization GitHub head drifted.');
+  if (config.schema_version === '3') {
+    const scope = auth.github.scope;
+    const file = scope.files[0];
+    if (
+      auth.github.draft !== false ||
+      scope.commits !== 1 || scope.changedFiles !== 1 ||
+      scope.additions !== 8 || scope.deletions !== 0 || !file ||
+      file.status !== 'added' || file.additions !== 8 || file.deletions !== 0 || file.changes !== 8
+    )
+      throw new Error('Successor activation requires the exact non-draft one-file canary.');
+  }
   const authorizedPaths =
-    config.schema_version === '1'
-      ? [...HISTORICAL_TASK020_FILES]
-      : ['documentation/runner-v1-first-activation-canary.md'];
+    config.schema_version === '2'
+      ? ['documentation/runner-v1-first-activation-canary.md']
+      : config.schema_version === '3'
+        ? ['documentation/runner-v1-activation-canary-002.md']
+        : [...HISTORICAL_TASK020_FILES];
   if (
     JSON.stringify(auth.github.scope.files.map((file) => file.path).sort()) !==
     JSON.stringify(authorizedPaths.sort())
@@ -513,7 +528,7 @@ export async function launchProductionCompanyRunner(
   );
   if (installedVersion !== authorization.codex_version || installedVersion !== config.codex_version)
     throw new Error('Installed Codex version differs from the exact authorization.');
-  if (config.schema_version === '2') {
+  if (config.schema_version !== '1') {
     const authenticationStatus = await (
       options.codexAuthenticationProbe ?? probeManagedCodexAuthentication
     )(config.executable, probeEnvironment);

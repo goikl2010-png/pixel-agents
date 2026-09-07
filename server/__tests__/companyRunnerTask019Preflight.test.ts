@@ -11,6 +11,7 @@ import {
   productionConfigurationSha256,
   task019ConfigurationSha256,
   validateControlledActivationConfig,
+  validateSuccessorActivationConfig,
   validateTask019PreflightConfig,
 } from '../../scripts/company-runner-task-019-preflight.js';
 
@@ -223,4 +224,81 @@ it('accepts one exact schema-v2 non-TASK-020 canary and pins current Codex', asy
     { ...config, max_dispatches: 2 },
   ])
     expect(() => validateControlledActivationConfig(candidate)).toThrow();
+});
+
+it('accepts only the exact schema-v3 TASK-032 successor package', () => {
+  const root = 'C:\\AI-Company';
+  const schema = `${root}\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json`;
+  const config = validateSuccessorActivationConfig({
+    schema_version: '3',
+    active: false,
+    mode: 'run-once',
+    task_id: 'TASK-032',
+    target_repository: 'goikl2010-png/AI-Company',
+    target_issue: 14,
+    target_pr: 15,
+    target_state: 'READY_FOR_QA',
+    target_owner: 'Pixel',
+    target_path: `${root}\\tasks\\review\\codex-pixel-agents-032.md`,
+    target_sha256: 'a'.repeat(64),
+    target_head: 'b'.repeat(40),
+    runner_commit: 'c'.repeat(40),
+    max_dispatches: 1,
+    dispatcher: 'codex',
+    approval_policy: 'on-request',
+    executable: 'C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd',
+    codex_version: 'codex-cli 0.152.1',
+    approved_working_root: root,
+    output_schema: schema,
+    state_directory: `${root}\\.company-runner-state\\TASK-032`,
+    stop_file: `${root}\\.company-runner-state\\TASK-032\\STOP`,
+    timeout_ms: 120000,
+    lease_ttl_ms: 30000,
+    heartbeat_ms: 10000,
+    circuit_failure_threshold: 3,
+    workflow_mutation_adapter: false,
+    credential_environment_variable: 'GH_TOKEN',
+    required_global_capability: '--ask-for-approval on-request',
+    required_exec_capabilities: [
+      '--json',
+      '--output-schema <FILE>',
+      '--cd <DIR>',
+      '--sandbox <SANDBOX_MODE>',
+    ],
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      root,
+      '--output-schema',
+      schema,
+      '<JSON_HANDOFF_PACKET>',
+    ],
+  });
+  expect(config).toMatchObject({
+    schema_version: '3',
+    task_id: 'TASK-032',
+    codex_version: 'codex-cli 0.152.1',
+  });
+  expect(productionConfigurationSha256(config)).toMatch(/^[0-9a-f]{64}$/);
+  for (const candidate of [
+    { ...config, schema_version: '2' },
+    { ...config, task_id: 'TASK-028' },
+    { ...config, task_id: 'TASK-030' },
+    { ...config, task_id: 'TASK-020' },
+    { ...config, target_issue: 7 },
+    { ...config, target_pr: 11 },
+    { ...config, target_state: 'COMPLETED' },
+    { ...config, target_path: `${root}\\tasks\\completed\\codex-pixel-agents-028.md` },
+    { ...config, state_directory: `${root}\\.company-runner-state\\TASK-028` },
+    { ...config, stop_file: `${root}\\.company-runner-state\\TASK-028\\STOP` },
+    { ...config, codex_version: 'codex-cli 0.150.1' },
+    { ...config, timeout_ms: 119999 },
+    { ...config, max_dispatches: 2 },
+  ])
+    expect(() => validateSuccessorActivationConfig(candidate)).toThrow();
 });
