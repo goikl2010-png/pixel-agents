@@ -386,7 +386,9 @@ function assertExactAuthorization(
     auth.github.branch !==
       (config.schema_version === '2'
         ? `task/${config.task_id}-runner-v1-activation-canary`
-        : 'task/TASK-020-reconcile-company-runner-roadmap') ||
+        : config.schema_version === '3'
+          ? 'task/TASK-032-runner-v1-activation-canary-002'
+          : 'task/TASK-020-reconcile-company-runner-roadmap') ||
     auth.github.issueState !== 'OPEN' ||
     auth.github.prState !== 'OPEN'
   )
@@ -397,10 +399,23 @@ function assertExactAuthorization(
     auth.github.head !== config.target_head
   )
     throw new Error('Initial production authorization GitHub head drifted.');
+  if (config.schema_version === '3') {
+    const scope = auth.github.scope;
+    const file = scope.files[0];
+    if (
+      auth.github.draft !== false ||
+      scope.commits !== 1 || scope.changedFiles !== 1 ||
+      scope.additions !== 8 || scope.deletions !== 0 || !file ||
+      file.status !== 'added' || file.additions !== 8 || file.deletions !== 0 || file.changes !== 8
+    )
+      throw new Error('Successor activation requires the exact non-draft one-file canary.');
+  }
   const authorizedPaths =
     config.schema_version === '2'
       ? ['documentation/runner-v1-first-activation-canary.md']
-      : [...HISTORICAL_TASK020_FILES];
+      : config.schema_version === '3'
+        ? ['documentation/runner-v1-activation-canary-002.md']
+        : [...HISTORICAL_TASK020_FILES];
   if (
     JSON.stringify(auth.github.scope.files.map((file) => file.path).sort()) !==
     JSON.stringify(authorizedPaths.sort())

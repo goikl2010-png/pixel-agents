@@ -72,10 +72,10 @@ export interface SuccessorActivationConfig {
   schema_version: '3';
   active: false;
   mode: 'run-once';
-  task_id: 'TASK-020';
+  task_id: 'TASK-032';
   target_repository: 'goikl2010-png/AI-Company';
-  target_issue: 3;
-  target_pr: 4;
+  target_issue: 14;
+  target_pr: 15;
   target_state: 'READY_FOR_QA';
   target_owner: 'Pixel';
   target_path: string;
@@ -250,15 +250,15 @@ export function validateSuccessorActivationConfig(value: unknown): SuccessorActi
     config.schema_version !== '3' ||
     config.active !== false ||
     config.mode !== 'run-once' ||
-    config.task_id !== 'TASK-020' ||
+    config.task_id !== 'TASK-032' ||
     config.target_repository !== 'goikl2010-png/AI-Company' ||
-    config.target_issue !== 3 ||
-    config.target_pr !== 4 ||
+    config.target_issue !== 14 ||
+    config.target_pr !== 15 ||
     config.target_state !== 'READY_FOR_QA' ||
     config.target_owner !== 'Pixel' ||
-    config.target_path !== 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-020.md' ||
-    config.state_directory !== 'C:\\AI-Company\\.company-runner-state\\TASK-020' ||
-    config.stop_file !== 'C:\\AI-Company\\.company-runner-state\\TASK-020\\STOP' ||
+    config.target_path !== 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-032.md' ||
+    config.state_directory !== 'C:\\AI-Company\\.company-runner-state\\TASK-032' ||
+    config.stop_file !== 'C:\\AI-Company\\.company-runner-state\\TASK-032\\STOP' ||
     config.max_dispatches !== 1 ||
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||

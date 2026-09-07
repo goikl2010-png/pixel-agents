@@ -1112,14 +1112,17 @@ it('schema-v3 preserves governance-first managed authentication and zero launch'
   const candidate = await fixture();
   Object.assign(candidate.config, {
     schema_version: '3',
+    task_id: 'TASK-032',
     codex_version: 'codex-cli 0.152.1',
-    target_path: 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-020.md',
+    target_issue: 14,
+    target_pr: 15,
+    target_path: 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-032.md',
     executable: 'C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd',
     approved_working_root: 'C:\\AI-Company',
     output_schema:
       'C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json',
-    state_directory: 'C:\\AI-Company\\.company-runner-state\\TASK-020',
-    stop_file: 'C:\\AI-Company\\.company-runner-state\\TASK-020\\STOP',
+    state_directory: 'C:\\AI-Company\\.company-runner-state\\TASK-032',
+    stop_file: 'C:\\AI-Company\\.company-runner-state\\TASK-032\\STOP',
     argument_template: [
       '--ask-for-approval',
       'on-request',
@@ -1136,11 +1139,26 @@ it('schema-v3 preserves governance-first managed authentication and zero launch'
   });
   Object.assign(candidate.authorization, {
     schema_version: '3',
+    task_id: 'TASK-032',
     codex_version: 'codex-cli 0.152.1',
     executable: candidate.config.executable,
     approved_working_root: candidate.config.approved_working_root,
     output_schema: candidate.config.output_schema,
     argument_template: candidate.config.argument_template,
+  });
+  candidate.authorization.expected_effects = [...expectedEffectsForAuthorization('READY_FOR_QA', 'Pixel', 'TASK-032')];
+  const github = candidate.authorization.github as {
+    draft: boolean;
+    pr: number;
+    branch: string;
+    scope: { commits: number; additions: number; files: Array<{ path: string }> };
+  };
+  Object.assign(github, {
+    issue: 14, pr: 15, draft: false,
+    branch: 'task/TASK-032-runner-v1-activation-canary-002',
+    scope: { commits: 1, additions: 8, deletions: 0, changedFiles: 1, files: [
+      { path: 'documentation/runner-v1-activation-canary-002.md', status: 'added', additions: 8, deletions: 0, changes: 8 },
+    ] },
   });
   candidate.authorization.configuration_sha256 = sha256(
     `${JSON.stringify(candidate.config, null, 2)}\n`,
@@ -1149,6 +1167,27 @@ it('schema-v3 preserves governance-first managed authentication and zero launch'
     writeFile(candidate.configPath, `${JSON.stringify(candidate.config, null, 2)}\n`),
     rewriteAuthorization(candidate, candidate.authorization),
   ]);
+  const validAuthorization = JSON.stringify(candidate.authorization);
+  for (const mutate of [
+    (auth: typeof github) => { auth.draft = true; },
+    (auth: typeof github) => { auth.pr = 4; },
+    (auth: typeof github) => { auth.branch = 'task/TASK-020-reconcile-company-runner-roadmap'; },
+    (auth: typeof github) => { auth.scope.commits = 2; },
+    (auth: typeof github) => { auth.scope.additions = 9; },
+    (auth: typeof github) => { auth.scope.files[0].path = 'COMPANY-MEMORY.md'; },
+  ]) {
+    const drifted = JSON.parse(validAuthorization) as typeof candidate.authorization;
+    mutate(drifted.github as typeof github);
+    await rewriteAuthorization(candidate, drifted);
+    const rejectedCounters = { github: 0, spawn: 0 };
+    await expect(launchProductionCompanyRunner({
+      ...seams(candidate, rejectedCounters),
+      checkoutProbe: async () => { throw new Error('Unexpected checkout probe'); },
+    })).rejects.toThrow(/Successor activation requires|Production (?:launch )?authorization/);
+    expect(rejectedCounters).toEqual({ github: 0, spawn: 0 });
+  }
+  await rewriteAuthorization(candidate, JSON.parse(validAuthorization));
+  governanceGateProcess.calls.length = 0;
   let authenticationProbes = 0;
   const counters = { github: 0, spawn: 0 };
   await expect(

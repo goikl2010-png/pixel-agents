@@ -226,20 +226,20 @@ it('accepts one exact schema-v2 non-TASK-020 canary and pins current Codex', asy
     expect(() => validateControlledActivationConfig(candidate)).toThrow();
 });
 
-it('accepts only the exact schema-v3 TASK-020 successor package', () => {
+it('accepts only the exact schema-v3 TASK-032 successor package', () => {
   const root = 'C:\\AI-Company';
   const schema = `${root}\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json`;
   const config = validateSuccessorActivationConfig({
     schema_version: '3',
     active: false,
     mode: 'run-once',
-    task_id: 'TASK-020',
+    task_id: 'TASK-032',
     target_repository: 'goikl2010-png/AI-Company',
-    target_issue: 3,
-    target_pr: 4,
+    target_issue: 14,
+    target_pr: 15,
     target_state: 'READY_FOR_QA',
     target_owner: 'Pixel',
-    target_path: `${root}\\tasks\\review\\codex-pixel-agents-020.md`,
+    target_path: `${root}\\tasks\\review\\codex-pixel-agents-032.md`,
     target_sha256: 'a'.repeat(64),
     target_head: 'b'.repeat(40),
     runner_commit: 'c'.repeat(40),
@@ -250,8 +250,8 @@ it('accepts only the exact schema-v3 TASK-020 successor package', () => {
     codex_version: 'codex-cli 0.152.1',
     approved_working_root: root,
     output_schema: schema,
-    state_directory: `${root}\\.company-runner-state\\TASK-020`,
-    stop_file: `${root}\\.company-runner-state\\TASK-020\\STOP`,
+    state_directory: `${root}\\.company-runner-state\\TASK-032`,
+    stop_file: `${root}\\.company-runner-state\\TASK-032\\STOP`,
     timeout_ms: 120000,
     lease_ttl_ms: 30000,
     heartbeat_ms: 10000,
@@ -281,7 +281,7 @@ it('accepts only the exact schema-v3 TASK-020 successor package', () => {
   });
   expect(config).toMatchObject({
     schema_version: '3',
-    task_id: 'TASK-020',
+    task_id: 'TASK-032',
     codex_version: 'codex-cli 0.152.1',
   });
   expect(productionConfigurationSha256(config)).toMatch(/^[0-9a-f]{64}$/);
@@ -289,6 +289,7 @@ it('accepts only the exact schema-v3 TASK-020 successor package', () => {
     { ...config, schema_version: '2' },
     { ...config, task_id: 'TASK-028' },
     { ...config, task_id: 'TASK-030' },
+    { ...config, task_id: 'TASK-020' },
     { ...config, target_issue: 7 },
     { ...config, target_pr: 11 },
     { ...config, target_state: 'COMPLETED' },
