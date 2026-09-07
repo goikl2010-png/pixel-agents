@@ -1146,7 +1146,9 @@ it('schema-v3 preserves governance-first managed authentication and zero launch'
     output_schema: candidate.config.output_schema,
     argument_template: candidate.config.argument_template,
   });
-  candidate.authorization.expected_effects = [...expectedEffectsForAuthorization('READY_FOR_QA', 'Pixel', 'TASK-032')];
+  candidate.authorization.expected_effects = [
+    ...expectedEffectsForAuthorization('READY_FOR_QA', 'Pixel', 'TASK-032'),
+  ];
   const github = candidate.authorization.github as {
     draft: boolean;
     pr: number;
@@ -1154,11 +1156,25 @@ it('schema-v3 preserves governance-first managed authentication and zero launch'
     scope: { commits: number; additions: number; files: Array<{ path: string }> };
   };
   Object.assign(github, {
-    issue: 14, pr: 15, draft: false,
+    issue: 14,
+    pr: 15,
+    draft: false,
     branch: 'task/TASK-032-runner-v1-activation-canary-002',
-    scope: { commits: 1, additions: 8, deletions: 0, changedFiles: 1, files: [
-      { path: 'documentation/runner-v1-activation-canary-002.md', status: 'added', additions: 8, deletions: 0, changes: 8 },
-    ] },
+    scope: {
+      commits: 1,
+      additions: 8,
+      deletions: 0,
+      changedFiles: 1,
+      files: [
+        {
+          path: 'documentation/runner-v1-activation-canary-002.md',
+          status: 'added',
+          additions: 8,
+          deletions: 0,
+          changes: 8,
+        },
+      ],
+    },
   });
   candidate.authorization.configuration_sha256 = sha256(
     `${JSON.stringify(candidate.config, null, 2)}\n`,
@@ -1169,21 +1185,37 @@ it('schema-v3 preserves governance-first managed authentication and zero launch'
   ]);
   const validAuthorization = JSON.stringify(candidate.authorization);
   for (const mutate of [
-    (auth: typeof github) => { auth.draft = true; },
-    (auth: typeof github) => { auth.pr = 4; },
-    (auth: typeof github) => { auth.branch = 'task/TASK-020-reconcile-company-runner-roadmap'; },
-    (auth: typeof github) => { auth.scope.commits = 2; },
-    (auth: typeof github) => { auth.scope.additions = 9; },
-    (auth: typeof github) => { auth.scope.files[0].path = 'COMPANY-MEMORY.md'; },
+    (auth: typeof github) => {
+      auth.draft = true;
+    },
+    (auth: typeof github) => {
+      auth.pr = 4;
+    },
+    (auth: typeof github) => {
+      auth.branch = 'task/TASK-020-reconcile-company-runner-roadmap';
+    },
+    (auth: typeof github) => {
+      auth.scope.commits = 2;
+    },
+    (auth: typeof github) => {
+      auth.scope.additions = 9;
+    },
+    (auth: typeof github) => {
+      auth.scope.files[0].path = 'COMPANY-MEMORY.md';
+    },
   ]) {
     const drifted = JSON.parse(validAuthorization) as typeof candidate.authorization;
     mutate(drifted.github as typeof github);
     await rewriteAuthorization(candidate, drifted);
     const rejectedCounters = { github: 0, spawn: 0 };
-    await expect(launchProductionCompanyRunner({
-      ...seams(candidate, rejectedCounters),
-      checkoutProbe: async () => { throw new Error('Unexpected checkout probe'); },
-    })).rejects.toThrow(/Successor activation requires|Production (?:launch )?authorization/);
+    await expect(
+      launchProductionCompanyRunner({
+        ...seams(candidate, rejectedCounters),
+        checkoutProbe: async () => {
+          throw new Error('Unexpected checkout probe');
+        },
+      }),
+    ).rejects.toThrow(/Successor activation requires|Production (?:launch )?authorization/);
     expect(rejectedCounters).toEqual({ github: 0, spawn: 0 });
   }
   await rewriteAuthorization(candidate, JSON.parse(validAuthorization));
