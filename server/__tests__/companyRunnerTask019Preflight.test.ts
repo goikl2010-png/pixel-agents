@@ -10,6 +10,7 @@ import {
 import {
   productionConfigurationSha256,
   task019ConfigurationSha256,
+  validateCanary003ActivationConfig,
   validateControlledActivationConfig,
   validateSuccessorActivationConfig,
   validateTask019PreflightConfig,
@@ -301,4 +302,83 @@ it('accepts only the exact schema-v3 TASK-032 successor package', () => {
     { ...config, max_dispatches: 2 },
   ])
     expect(() => validateSuccessorActivationConfig(candidate)).toThrow();
+});
+
+it('accepts only the exact schema-v4 TASK-033 canary package', () => {
+  const root = 'C:\\AI-Company';
+  const schema = `${root}\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json`;
+  const config = validateCanary003ActivationConfig({
+    schema_version: '4',
+    active: false,
+    mode: 'run-once',
+    task_id: 'TASK-033',
+    target_repository: 'goikl2010-png/AI-Company',
+    target_issue: 16,
+    target_pr: 17,
+    target_state: 'READY_FOR_QA',
+    target_owner: 'Pixel',
+    target_path: `${root}\\tasks\\review\\codex-pixel-agents-033.md`,
+    target_sha256: 'a'.repeat(64),
+    target_head: 'b'.repeat(40),
+    runner_commit: 'c'.repeat(40),
+    max_dispatches: 1,
+    dispatcher: 'codex',
+    approval_policy: 'on-request',
+    executable: 'C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd',
+    codex_version: 'codex-cli 0.153.4',
+    approved_working_root: root,
+    output_schema: schema,
+    state_directory: `${root}\\.company-runner-state\\TASK-033`,
+    stop_file: `${root}\\.company-runner-state\\TASK-033\\STOP`,
+    timeout_ms: 120000,
+    lease_ttl_ms: 30000,
+    heartbeat_ms: 10000,
+    circuit_failure_threshold: 3,
+    workflow_mutation_adapter: false,
+    credential_environment_variable: 'GH_TOKEN',
+    required_global_capability: '--ask-for-approval on-request',
+    required_exec_capabilities: [
+      '--json',
+      '--output-schema <FILE>',
+      '--cd <DIR>',
+      '--sandbox <SANDBOX_MODE>',
+    ],
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      root,
+      '--output-schema',
+      schema,
+      '<JSON_HANDOFF_PACKET>',
+    ],
+  });
+  expect(config).toMatchObject({
+    schema_version: '4',
+    task_id: 'TASK-033',
+    codex_version: 'codex-cli 0.153.4',
+  });
+  expect(productionConfigurationSha256(config)).toMatch(/^[0-9a-f]{64}$/);
+  for (const candidate of [
+    { ...config, schema_version: '3' },
+    { ...config, task_id: 'TASK-032' },
+    { ...config, target_issue: 14 },
+    { ...config, target_pr: 15 },
+    { ...config, target_state: 'COMPLETED' },
+    { ...config, target_owner: 'Alex' },
+    { ...config, target_path: `${root}\\tasks\\completed\\codex-pixel-agents-033.md` },
+    { ...config, target_sha256: 'A'.repeat(64) },
+    { ...config, target_head: 'B'.repeat(40) },
+    { ...config, runner_commit: 'C'.repeat(40) },
+    { ...config, codex_version: 'codex-cli 0.152.1' },
+    { ...config, active: true },
+    { ...config, max_dispatches: 2 },
+    { ...config, timeout_ms: 120001 },
+    { ...config, workflow_mutation_adapter: true },
+  ])
+    expect(() => validateCanary003ActivationConfig(candidate)).toThrow();
 });
