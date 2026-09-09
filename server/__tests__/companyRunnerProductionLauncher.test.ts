@@ -1317,6 +1317,62 @@ it('schema-v4 pins TASK-033 scope and exact Codex while preserving governance-fi
   ]);
 
   const validAuthorization = JSON.stringify(candidate.authorization);
+  const initialTaskBytes = await readFile(candidate.taskPath, 'utf8');
+  for (const [state, owner] of [
+    ['QA', 'Pixel'],
+    ['QA_RETEST', 'Pixel'],
+    ['REVIEW', 'Atlas'],
+  ] as const) {
+    const drifted = JSON.parse(validAuthorization) as typeof candidate.authorization;
+    const driftedHead = 'c'.repeat(40);
+    const driftedTaskBytes = initialTaskBytes
+      .replace('- **Owner:** Pixel', `- **Owner:** ${owner}`)
+      .replace('- **Current state:** READY_FOR_QA', `- **Current state:** ${state}`)
+      .replace(TARGET_HEAD, driftedHead);
+    drifted.target_state = state;
+    drifted.target_owner = owner;
+    drifted.target_sha256 = sha256(driftedTaskBytes);
+    drifted.expected_effects = [...expectedEffectsForAuthorization(state, owner, 'TASK-033')];
+    (drifted.github as { head: string }).head = driftedHead;
+    await Promise.all([
+      writeFile(candidate.taskPath, driftedTaskBytes),
+      rewriteAuthorization(candidate, drifted),
+    ]);
+    governanceGateProcess.calls.length = 0;
+    const rejectedCounters = { github: 0, spawn: 0 };
+    const probeCounters = { checkout: 0, version: 0, authentication: 0, capability: 0 };
+    await expect(
+      launchProductionCompanyRunner({
+        ...seams(candidate, rejectedCounters),
+        checkoutProbe: async () => {
+          probeCounters.checkout++;
+          throw new Error('Unexpected checkout probe');
+        },
+        versionProbe: async () => {
+          probeCounters.version++;
+          throw new Error('Unexpected version probe');
+        },
+        codexAuthenticationProbe: async () => {
+          probeCounters.authentication++;
+          throw new Error('Unexpected authentication probe');
+        },
+        globalCapabilityProbe: async () => {
+          probeCounters.capability++;
+          throw new Error('Unexpected capability probe');
+        },
+        capabilityProbe: async () => {
+          probeCounters.capability++;
+          throw new Error('Unexpected capability probe');
+        },
+      }),
+    ).rejects.toThrow('Schema-v4 production authorization target contract drifted.');
+    expect(governanceGateProcess.calls).toHaveLength(1);
+    expect(probeCounters).toEqual({ checkout: 0, version: 0, authentication: 0, capability: 0 });
+    expect(rejectedCounters).toEqual({ github: 0, spawn: 0 });
+    expect(existsSync(candidate.stateDirectory)).toBe(false);
+  }
+  await writeFile(candidate.taskPath, initialTaskBytes);
+
   for (const mutate of [
     (auth: typeof github) => {
       auth.draft = true;

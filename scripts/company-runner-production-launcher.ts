@@ -344,6 +344,14 @@ function assertExactAuthorization(
   if (auth.schema_version !== config.schema_version || auth.task_id !== config.task_id)
     throw new Error('Production authorization schema or task identity drifted.');
   if (
+    config.schema_version === '4' &&
+    (auth.target_state !== config.target_state ||
+      auth.target_owner !== config.target_owner ||
+      auth.target_sha256 !== config.target_sha256 ||
+      auth.github.head !== config.target_head)
+  )
+    throw new Error('Schema-v4 production authorization target contract drifted.');
+  if (
     auth.target_state === config.target_state &&
     auth.target_owner === config.target_owner &&
     auth.target_sha256 !== config.target_sha256
