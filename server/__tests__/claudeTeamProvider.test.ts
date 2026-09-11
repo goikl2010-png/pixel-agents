@@ -1,8 +1,9 @@
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { claudeTeamProvider } from '../src/providers/hook/claude/claudeTeamProvider.js';
+import { isolateTestHome } from './helpers/testHome.js';
 
 describe('claudeTeamProvider', () => {
   describe('identity', () => {
@@ -388,19 +389,21 @@ describe('claudeTeamProvider', () => {
   });
 
   describe('getTeamMembers', () => {
-    // Writes under ~/.claude/teams/<TEAM_NAME>/ and cleans up in afterEach.
     const fs = require('fs') as typeof import('fs');
     const TEAM_NAME = 'test-team-' + Date.now();
+    let tempHome: string;
+    let restoreTestHome: () => void;
+
+    beforeEach(() => {
+      tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-agents-team-home-'));
+      restoreTestHome = isolateTestHome(tempHome);
+    });
 
     afterEach(() => {
-      // Cleanup any test artifacts
       try {
-        fs.rmSync(path.join(os.homedir(), '.claude', 'teams', TEAM_NAME), {
-          recursive: true,
-          force: true,
-        });
-      } catch {
-        /* ignore */
+        fs.rmSync(tempHome, { recursive: true, force: true });
+      } finally {
+        restoreTestHome();
       }
     });
 
