@@ -170,12 +170,47 @@ export interface Canary004ActivationConfig {
   argument_template: string[];
 }
 
+export interface Canary005ActivationConfig {
+  schema_version: '6';
+  active: false;
+  mode: 'run-once';
+  task_id: 'TASK-037';
+  target_repository: 'goikl2010-png/AI-Company';
+  target_issue: 20;
+  target_pr: 21;
+  target_state: 'READY_FOR_REVIEW';
+  target_owner: 'Atlas';
+  target_path: string;
+  target_sha256: string;
+  target_head: string;
+  runner_commit: string;
+  max_dispatches: 1;
+  dispatcher: 'codex';
+  approval_policy: 'on-request';
+  executable: string;
+  codex_version: 'codex-cli 0.154.0';
+  approved_working_root: string;
+  output_schema: string;
+  state_directory: string;
+  stop_file: string;
+  timeout_ms: 120000;
+  lease_ttl_ms: 30000;
+  heartbeat_ms: 10000;
+  circuit_failure_threshold: 3;
+  workflow_mutation_adapter: false;
+  credential_environment_variable: 'GH_TOKEN';
+  required_global_capability: '--ask-for-approval on-request';
+  required_exec_capabilities: string[];
+  argument_template: string[];
+}
+
 export type ProductionRunnerConfig =
   | Task019PreflightConfig
   | ControlledActivationConfig
   | SuccessorActivationConfig
   | Canary003ActivationConfig
-  | Canary004ActivationConfig;
+  | Canary004ActivationConfig
+  | Canary005ActivationConfig;
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}$/;
@@ -412,6 +447,39 @@ export function validateCanary004ActivationConfig(value: unknown): Canary004Acti
   return config as unknown as Canary004ActivationConfig;
 }
 
+export function validateCanary005ActivationConfig(value: unknown): Canary005ActivationConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Canary 005 activation configuration must be an object.');
+  const config = value as Record<string, unknown>;
+  assertCommonConfiguration(config, 'Canary 005 activation');
+  if (
+    config.schema_version !== '6' ||
+    config.active !== false ||
+    config.mode !== 'run-once' ||
+    config.task_id !== 'TASK-037' ||
+    config.target_repository !== 'goikl2010-png/AI-Company' ||
+    config.target_issue !== 20 ||
+    config.target_pr !== 21 ||
+    config.target_state !== 'READY_FOR_REVIEW' ||
+    config.target_owner !== 'Atlas' ||
+    config.target_path !== 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-037.md' ||
+    config.state_directory !== 'C:\\AI-Company\\.company-runner-state\\TASK-037' ||
+    config.stop_file !== 'C:\\AI-Company\\.company-runner-state\\TASK-037\\STOP' ||
+    config.max_dispatches !== 1 ||
+    config.dispatcher !== 'codex' ||
+    config.approval_policy !== 'on-request' ||
+    config.codex_version !== 'codex-cli 0.154.0' ||
+    config.timeout_ms !== 120_000 ||
+    config.lease_ttl_ms !== 30_000 ||
+    config.heartbeat_ms !== 10_000 ||
+    config.workflow_mutation_adapter !== false ||
+    config.credential_environment_variable !== 'GH_TOKEN' ||
+    config.required_global_capability !== '--ask-for-approval on-request'
+  )
+    throw new Error('Canary 005 activation configuration violates a fixed run-once invariant.');
+  return config as unknown as Canary005ActivationConfig;
+}
+
 export function validateProductionRunnerConfig(value: unknown): ProductionRunnerConfig {
   if ((value as { schema_version?: unknown } | null)?.schema_version === '2')
     return validateControlledActivationConfig(value);
@@ -421,6 +489,8 @@ export function validateProductionRunnerConfig(value: unknown): ProductionRunner
     return validateCanary003ActivationConfig(value);
   if ((value as { schema_version?: unknown } | null)?.schema_version === '5')
     return validateCanary004ActivationConfig(value);
+  if ((value as { schema_version?: unknown } | null)?.schema_version === '6')
+    return validateCanary005ActivationConfig(value);
   return validateTask019PreflightConfig(value);
 }
 

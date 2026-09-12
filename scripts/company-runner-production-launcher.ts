@@ -21,7 +21,7 @@ import {
 } from './company-runner-task-019-preflight.js';
 
 export interface GoiRedLaunchAuthorization {
-  schema_version: '1' | '2' | '3' | '4' | '5';
+  schema_version: '1' | '2' | '3' | '4' | '5' | '6';
   authorization: 'RED';
   authorized_by: 'Goi';
   task_id: string;
@@ -277,7 +277,7 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
       auth.target_owner === 'Atlas') ||
     (auth.target_state === 'APPROVED' && auth.target_owner === 'Alex');
   if (
-    !['1', '2', '3', '4', '5'].includes(auth.schema_version ?? '') ||
+    !['1', '2', '3', '4', '5', '6'].includes(auth.schema_version ?? '') ||
     auth.authorization !== 'RED' ||
     auth.authorized_by !== 'Goi' ||
     typeof auth.task_id !== 'string' ||
@@ -345,16 +345,16 @@ function assertExactAuthorization(
   if (auth.schema_version !== config.schema_version || auth.task_id !== config.task_id)
     throw new Error('Production authorization schema or task identity drifted.');
   if (
-    (config.schema_version === '4' || config.schema_version === '5') &&
+    (config.schema_version === '4' ||
+      config.schema_version === '5' ||
+      config.schema_version === '6') &&
     (auth.target_state !== config.target_state ||
       auth.target_owner !== config.target_owner ||
       auth.target_sha256 !== config.target_sha256 ||
       auth.github.head !== config.target_head)
   )
     throw new Error(
-      config.schema_version === '4'
-        ? 'Schema-v4 production authorization target contract drifted.'
-        : 'Schema-v5 production authorization target contract drifted.',
+      `Schema-v${config.schema_version} production authorization target contract drifted.`,
     );
   if (
     auth.target_state === config.target_state &&
@@ -405,7 +405,9 @@ function assertExactAuthorization(
             ? 'task/TASK-033-runner-v1-activation-canary-003'
             : config.schema_version === '5'
               ? 'task/TASK-035-runner-v1-activation-canary-004'
-              : 'task/TASK-020-reconcile-company-runner-roadmap') ||
+              : config.schema_version === '6'
+                ? 'task/TASK-037-runner-v1-successor-activation-canary-005'
+                : 'task/TASK-020-reconcile-company-runner-roadmap') ||
     auth.github.issueState !== 'OPEN' ||
     auth.github.prState !== 'OPEN'
   )
@@ -419,7 +421,8 @@ function assertExactAuthorization(
   if (
     config.schema_version === '3' ||
     config.schema_version === '4' ||
-    config.schema_version === '5'
+    config.schema_version === '5' ||
+    config.schema_version === '6'
   ) {
     const scope = auth.github.scope;
     const file = scope.files[0];
@@ -446,7 +449,9 @@ function assertExactAuthorization(
           ? ['documentation/runner-v1-activation-canary-003.md']
           : config.schema_version === '5'
             ? ['documentation/runner-v1-activation-canary-004.md']
-            : [...HISTORICAL_TASK020_FILES];
+            : config.schema_version === '6'
+              ? ['documentation/runner-v1-activation-canary-005.md']
+              : [...HISTORICAL_TASK020_FILES];
   if (
     JSON.stringify(auth.github.scope.files.map((file) => file.path).sort()) !==
     JSON.stringify(authorizedPaths.sort())
