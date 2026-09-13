@@ -6,6 +6,7 @@ import { promisify } from 'util';
 
 import {
   buildGovernedChildEnvironment,
+  captureGovernedProcessOutput,
   CodexAgentDispatcher,
   GhCliGitHubFactResolver,
   type GitHubFacts,
@@ -71,6 +72,11 @@ export interface RunnerCheckoutProvenance {
   root: string;
   head: string;
   dirty: boolean;
+}
+
+export function runnerCheckoutGitArguments(checkoutRoot: string, args: string[]): string[] {
+  const normalizedRoot = path.resolve(checkoutRoot).replace(/\\/g, '/');
+  return ['-c', `safe.directory=${normalizedRoot}`, ...args];
 }
 
 export interface SanitizedProductionLaunchResult {
@@ -164,7 +170,7 @@ const CREDENTIAL_CONTENT =
   /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|bearer\s+\S+|-----BEGIN [^-]*PRIVATE KEY-----|(?:password|secret|token|private[_ -]?key)\s*[:=]\s*\S+)/i;
 const execFileAsync = promisify(execFile);
 const runnerCheckoutRoot = path.resolve(__dirname, '..');
-const GOVERNANCE_INTEGRITY_TIMEOUT_MS = 30_000;
+const GOVERNANCE_INTEGRITY_TIMEOUT_MS = 120_000;
 
 async function enforceSharedGovernanceIntegrityGate(
   companyRoot: string,
@@ -459,14 +465,32 @@ function assertExactAuthorization(
     throw new Error('Production authorization Pull Request scope drifted.');
 }
 
-async function probeRunnerCheckout(checkoutRoot: string): Promise<RunnerCheckoutProvenance> {
+export async function probeRunnerCheckout(checkoutRoot: string): Promise<RunnerCheckoutProvenance> {
   try {
     const [rootResult, headResult, statusResult] = await Promise.all([
-      execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: checkoutRoot }),
-      execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: checkoutRoot }),
-      execFileAsync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
-        cwd: checkoutRoot,
-      }),
+      execFileAsync(
+        'git',
+        runnerCheckoutGitArguments(checkoutRoot, ['rev-parse', '--show-toplevel']),
+        {
+          cwd: checkoutRoot,
+        },
+      ),
+      execFileAsync(
+        'git',
+        runnerCheckoutGitArguments(checkoutRoot, ['rev-parse', '--verify', 'HEAD']),
+        {
+          cwd: checkoutRoot,
+        },
+      ),
+      execFileAsync(
+        'git',
+        runnerCheckoutGitArguments(checkoutRoot, [
+          'status',
+          '--porcelain=v1',
+          '--untracked-files=normal',
+        ]),
+        { cwd: checkoutRoot },
+      ),
     ]);
     return {
       root: rootResult.stdout.trim(),
@@ -492,34 +516,32 @@ function assertRunnerCheckout(
     throw new Error('Runner checkout is stale or differs from the authorized merged commit.');
 }
 
-async function probeProductionCodexVersion(
+export async function probeProductionCodexVersion(
   executable: string,
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   try {
-    const result = await execFileAsync(executable, ['--version'], {
-      env: environment,
-      windowsHide: true,
-    });
+    const result = await captureGovernedProcessOutput(executable, ['--version'], environment);
     return result.stdout.trim();
   } catch {
     throw new Error('Codex version probe failed.');
   }
 }
 
-async function probeManagedCodexAuthentication(
+export async function probeManagedCodexAuthentication(
   executable: string,
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   try {
-    const result = await execFileAsync(executable, ['login', 'status'], {
-      env: environment,
-      windowsHide: true,
-    });
-    return result.stdout.trim();
+    const result = await captureGovernedProcessOutput(executable, ['login', 'status'], environment);
+    return `${result.stdout}\n${result.stderr}`.trim();
   } catch {
     throw new Error('Managed-context Codex authentication is unavailable.');
   }
+}
+
+export function hasManagedCodexAuthentication(status: string): boolean {
+  return status.split(/\r?\n/).some((line) => /^Logged in(?:\s|$)/i.test(line.trim()));
 }
 
 function sanitizeResult(result: RunOnceResult): SanitizedProductionLaunchResult {
@@ -568,7 +590,7 @@ export async function launchProductionCompanyRunner(
     const authenticationStatus = await (
       options.codexAuthenticationProbe ?? probeManagedCodexAuthentication
     )(config.executable, probeEnvironment);
-    if (!/^Logged in(?:\s|$)/i.test(authenticationStatus.trim()))
+    if (!hasManagedCodexAuthentication(authenticationStatus))
       throw new Error('Managed-context Codex authentication is unavailable.');
   }
   if (path.resolve(options.companyRoot) !== path.resolve(config.approved_working_root))
