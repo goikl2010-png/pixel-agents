@@ -490,6 +490,7 @@ it('inherits one fake credential, process-scoped OpenSSL, and no unrelated secre
   const environment = buildGovernedChildEnvironment(
     {
       GH_TOKEN: 'fake-sentinel-gh-token',
+      HOME: 'C:\\managed-codex-home',
       PATH: 'safe-path',
       AWS_SECRET_ACCESS_KEY: 'must-not-pass',
       RANDOM_PRIVATE_TOKEN: 'must-not-pass',
@@ -498,6 +499,7 @@ it('inherits one fake credential, process-scoped OpenSSL, and no unrelated secre
   );
   expect(environment).toMatchObject({
     GH_TOKEN: 'fake-sentinel-gh-token',
+    HOME: 'C:\\managed-codex-home',
     PATH: 'safe-path',
     GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: 'http.sslBackend',
@@ -1286,6 +1288,33 @@ it('terminates a real unresponsive child and proves it no longer survives', asyn
   expect(result.timedOut).toBe(true);
   expect(() => process.kill(pid, 0)).toThrow();
 });
+
+it.skipIf(process.platform !== 'win32')(
+  'runs a governed .cmd child non-interactively with exact arguments',
+  async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'runner-cmd-child-'));
+    roots.push(root);
+    const executable = path.join(root, 'codex.cmd');
+    const entrypoint = path.join(root, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+    await mkdir(path.dirname(entrypoint), { recursive: true });
+    await Promise.all([
+      writeFile(executable, '@echo off\r\nexit /b 9\r\n'),
+      writeFile(entrypoint, 'process.stdout.write(process.argv[2]);\n'),
+    ]);
+
+    const result = await spawnGovernedProcess(
+      executable,
+      ['exact argument & symbols'],
+      root,
+      5_000,
+      new AbortController().signal,
+      process.env,
+    );
+
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, launched: true });
+    expect(result.output?.trim()).toBe('exact argument & symbols');
+  },
+);
 
 it.each([
   ['BACKLOG', 'DEVELOPMENT'],
