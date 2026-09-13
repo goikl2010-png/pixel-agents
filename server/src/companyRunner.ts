@@ -492,10 +492,70 @@ export class CodexAgentDispatcher implements AgentDispatcher {
   }
 }
 
+interface GovernedProcessInvocation {
+  executable: string;
+  args: string[];
+  windowsVerbatimArguments: boolean;
+}
+
+/** Resolves the configured Windows npm Codex shim to its adjacent JavaScript
+ * entry point so Node receives the original argument vector without cmd.exe. */
+export function resolveGovernedProcessInvocation(
+  executable: string,
+  args: string[],
+  _environment: NodeJS.ProcessEnv,
+): GovernedProcessInvocation {
+  if (process.platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(executable))
+    return { executable, args, windowsVerbatimArguments: false };
+  if (path.win32.basename(executable).toLowerCase() !== 'codex.cmd')
+    throw new Error('Unsupported governed Windows command script.');
+  return {
+    executable: process.execPath,
+    args: [
+      path.win32.join(
+        path.win32.dirname(executable),
+        'node_modules',
+        '@openai',
+        'codex',
+        'bin',
+        'codex.js',
+      ),
+      ...args,
+    ],
+    windowsVerbatimArguments: false,
+  };
+}
+
+export async function captureGovernedProcessOutput(
+  executable: string,
+  args: string[],
+  environment: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const invocation = resolveGovernedProcessInvocation(executable, args, environment);
+    const child = spawn(invocation.executable, invocation.args, {
+      env: environment,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
+    child.once('error', reject);
+    child.once('close', (code) =>
+      code === 0
+        ? resolve({ stdout, stderr })
+        : reject(new Error('Governed process returned a nonzero status.')),
+    );
+  });
+}
+
 const SAFE_PARENT_ENVIRONMENT = [
   'ALLUSERSPROFILE',
   'APPDATA',
   'COMSPEC',
+  'HOME',
   'HOMEDRIVE',
   'HOMEPATH',
   'LOCALAPPDATA',
@@ -587,9 +647,10 @@ async function probeCodexVersion(
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ['--version'], {
+    const invocation = resolveGovernedProcessInvocation(executable, ['--version'], environment);
+    const child = spawn(invocation.executable, invocation.args, {
       env: environment,
-      shell: false,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       windowsHide: true,
     });
     let output = '';
@@ -606,9 +667,14 @@ async function probeCodexCapabilities(
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ['exec', '--help'], {
+    const invocation = resolveGovernedProcessInvocation(
+      executable,
+      ['exec', '--help'],
+      environment,
+    );
+    const child = spawn(invocation.executable, invocation.args, {
       env: environment,
-      shell: false,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       windowsHide: true,
     });
     let output = '';
@@ -626,9 +692,10 @@ async function probeCodexGlobalCapabilities(
   environment: NodeJS.ProcessEnv,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ['--help'], {
+    const invocation = resolveGovernedProcessInvocation(executable, ['--help'], environment);
+    const child = spawn(invocation.executable, invocation.args, {
       env: environment,
-      shell: false,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       windowsHide: true,
     });
     let output = '';
@@ -686,7 +753,13 @@ export async function spawnGovernedProcess(
   env: NodeJS.ProcessEnv,
 ): Promise<DispatchResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd, env, shell: false, windowsHide: true });
+    const invocation = resolveGovernedProcessInvocation(executable, args, env);
+    const child = spawn(invocation.executable, invocation.args, {
+      cwd,
+      env,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      windowsHide: true,
+    });
     let output = '';
     child.stdout.on('data', (data: Buffer) => (output += data.toString('utf8')));
     let settled = false;

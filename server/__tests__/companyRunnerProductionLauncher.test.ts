@@ -48,8 +48,12 @@ import {
   EXACT_ROLLBACK,
   EXACT_STOP_CONDITIONS,
   expectedEffectsForAuthorization,
+  hasManagedCodexAuthentication,
   launchProductionCompanyRunner,
+  probeManagedCodexAuthentication,
+  probeProductionCodexVersion,
   type ProductionLaunchOptions,
+  runnerCheckoutGitArguments,
 } from '../../scripts/company-runner-production-launcher.js';
 import { CliArgsError, parseArgs, validateRunnerCliMode } from '../src/cli.js';
 
@@ -598,8 +602,55 @@ describe('production Company Runner launcher', () => {
           '-Consumer',
           'CompanyRunner',
         ],
-        options: { cwd: candidate.root, timeout: 30_000, windowsHide: true },
+        options: { cwd: candidate.root, timeout: 120_000, windowsHide: true },
       },
+    ]);
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'runs the configured .cmd version and login probes with HOME and accepts login on stderr',
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), 'task-039-codex-probe-'));
+      temporaryDirectories.push(root);
+      const executable = path.join(root, 'codex.cmd');
+      const entrypoint = path.join(root, 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+      await mkdir(path.dirname(entrypoint), { recursive: true });
+      await Promise.all([
+        writeFile(executable, '@echo off\r\nexit /b 9\r\n'),
+        writeFile(
+          entrypoint,
+          [
+            "if (process.argv[2] === '--version') console.log('codex-cli 0.154.0');",
+            "else if (process.argv[2] === 'login' && process.argv[3] === 'status') console.error('Logged in using managed authentication');",
+            'else process.exitCode = 9;',
+            '',
+          ].join('\n'),
+        ),
+      ]);
+      const environment = { ...process.env, HOME: path.join(root, 'managed-home') };
+
+      await expect(probeProductionCodexVersion(executable, environment)).resolves.toBe(
+        'codex-cli 0.154.0',
+      );
+      await expect(probeManagedCodexAuthentication(executable, environment)).resolves.toBe(
+        'Logged in using managed authentication',
+      );
+      expect(
+        hasManagedCodexAuthentication(
+          'WARNING: managed cleanup was unavailable\nLogged in using managed authentication',
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('uses process-scoped safe.directory for every Runner Git probe', () => {
+    const checkoutRoot = path.resolve('protected runner');
+    expect(runnerCheckoutGitArguments(checkoutRoot, ['rev-parse', '--verify', 'HEAD'])).toEqual([
+      '-c',
+      `safe.directory=${checkoutRoot.replace(/\\/g, '/')}`,
+      'rev-parse',
+      '--verify',
+      'HEAD',
     ]);
   });
 
