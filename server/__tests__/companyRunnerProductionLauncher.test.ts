@@ -645,9 +645,7 @@ describe('production Company Runner launcher', () => {
 
   it('uses process-scoped safe.directory for every Runner Git probe', () => {
     const checkoutRoot = path.resolve('protected runner');
-    expect(
-      runnerCheckoutGitArguments(checkoutRoot, ['rev-parse', '--verify', 'HEAD']),
-    ).toEqual([
+    expect(runnerCheckoutGitArguments(checkoutRoot, ['rev-parse', '--verify', 'HEAD'])).toEqual([
       '-c',
       `safe.directory=${checkoutRoot.replace(/\\/g, '/')}`,
       'rev-parse',
