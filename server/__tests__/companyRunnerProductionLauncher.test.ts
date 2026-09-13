@@ -644,9 +644,16 @@ describe('production Company Runner launcher', () => {
   );
 
   it('uses process-scoped safe.directory for every Runner Git probe', () => {
+    const checkoutRoot = path.resolve('protected runner');
     expect(
-      runnerCheckoutGitArguments('C:\\protected runner', ['rev-parse', '--verify', 'HEAD']),
-    ).toEqual(['-c', 'safe.directory=C:/protected runner', 'rev-parse', '--verify', 'HEAD']);
+      runnerCheckoutGitArguments(checkoutRoot, ['rev-parse', '--verify', 'HEAD']),
+    ).toEqual([
+      '-c',
+      `safe.directory=${checkoutRoot.replace(/\\/g, '/')}`,
+      'rev-parse',
+      '--verify',
+      'HEAD',
+    ]);
   });
 
   it.each([
