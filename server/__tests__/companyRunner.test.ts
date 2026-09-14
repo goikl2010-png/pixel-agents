@@ -117,6 +117,48 @@ it('requires exactly one explicit authoritative record', async () => {
   await expect(readRunnerTask(root, 'TASK-999')).rejects.toThrow('found 0');
 });
 
+it('treats only explicit evidence-link fields as evidence pointers', async () => {
+  const { root, task } = await fixture('READY_FOR_REVIEW', 'Atlas');
+  await writeFile(
+    task,
+    (await readFile(task, 'utf8')).replace(
+      '- **Evidence link:** `documentation/qa/report.md`',
+      '- **Files changed:** `documentation/unmerged-review-target.md`\n- **Evidence link:** `documentation/qa/report.md`',
+    ),
+  );
+
+  const parsed = await readRunnerTask(root, 'TASK-016');
+  expect(parsed.evidence).toEqual(['documentation/qa/report.md']);
+  await expect(reconcileRunnerFacts(root, parsed, githubResolver)).resolves.toMatchObject({
+    evidence: [{ path: 'documentation/qa/report.md' }],
+  });
+});
+
+it.each([
+  ['missing', 'documentation/qa/missing.md', 'missing or unreadable'],
+  ['escaping', 'documentation/../../outside.md', 'escapes company root'],
+])('fails closed for %s explicit evidence links', async (_name, pointer, message) => {
+  const { root, task } = await fixture('READY_FOR_REVIEW', 'Atlas');
+  await writeFile(
+    task,
+    (await readFile(task, 'utf8')).replace('documentation/qa/report.md', pointer),
+  );
+  await expect(
+    reconcileRunnerFacts(root, await readRunnerTask(root, 'TASK-016'), githubResolver),
+  ).rejects.toThrow(message);
+});
+
+it('fails closed for duplicate explicit evidence links', async () => {
+  const { root, task } = await fixture('READY_FOR_REVIEW', 'Atlas');
+  await writeFile(
+    task,
+    `${await readFile(task, 'utf8')}- **Evidence links:** \`documentation/qa/report.md\`\n`,
+  );
+  await expect(
+    reconcileRunnerFacts(root, await readRunnerTask(root, 'TASK-016'), githubResolver),
+  ).rejects.toThrow('Duplicate evidence pointer documentation/qa/report.md');
+});
+
 it('is deterministic and dry-run invokes no agent', async () => {
   const { root, stateDir } = await fixture();
   const task = await readRunnerTask(root, 'TASK-016');
