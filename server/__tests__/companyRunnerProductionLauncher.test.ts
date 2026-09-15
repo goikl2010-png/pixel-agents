@@ -924,6 +924,14 @@ describe('production Company Runner launcher', () => {
       (auth: Record<string, unknown>) => ({ ...auth, rollback: 'Continue automatically.' }),
     ],
     [
+      'attempt-005 rollback transcription',
+      (auth: Record<string, unknown>) => ({
+        ...auth,
+        rollback:
+          'Stop the one-shot Runner, preserve audit evidence, do not redispatch after ambiguity, and reassert activation HOLD.',
+      }),
+    ],
+    [
       'empty stop conditions',
       (auth: Record<string, unknown>) => ({ ...auth, stop_conditions: [] }),
     ],

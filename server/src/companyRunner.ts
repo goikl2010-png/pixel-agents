@@ -832,11 +832,27 @@ function sha256(value: string): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
-function field(markdown: string, name: string): string[] {
+function rawField(markdown: string, name: string): string[] {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return [
     ...markdown.matchAll(new RegExp(`^\\s*-?\\s*\\*\\*${escaped}:\\*\\*\\s*(.+?)\\s*$`, 'gim')),
-  ].map((match) => match[1].trim().replace(/^`|`$/g, ''));
+  ].map((match) => match[1].trim());
+}
+
+function field(markdown: string, name: string): string[] {
+  return rawField(markdown, name).map((value) => value.replace(/^`|`$/g, ''));
+}
+
+function explicitEvidencePointers(markdown: string): string[] {
+  return [
+    ...rawField(markdown, 'Evidence link'),
+    ...rawField(markdown, 'Evidence links'),
+    ...rawField(markdown, 'New evidence'),
+  ]
+    .flatMap((value) =>
+      [...value.matchAll(/`((?:documentation|tasks)[^`]+)`/g)].map((match) => match[1]),
+    )
+    .sort();
 }
 
 function inlineImplementationEvidence(
@@ -944,11 +960,7 @@ export async function readRunnerTask(companyRoot: string, taskId: string): Promi
     throw new Error('BLOCKED requires an exact valid nonterminal Resume state.');
   if (lifecycleState !== 'BLOCKED' && resumeState)
     throw new Error('Resume state is valid only for BLOCKED.');
-  const evidence = [
-    ...new Set(
-      [...match.bytes.matchAll(/`((?:documentation|tasks)[^`]+)`/g)].map((item) => item[1]),
-    ),
-  ].sort();
+  const evidence = explicitEvidencePointers(match.bytes);
   return {
     id: taskId,
     path: path.resolve(match.file),
