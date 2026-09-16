@@ -351,6 +351,80 @@ it('resolves typed live GitHub facts through fixed gh API paths without disclosi
   expect(JSON.stringify(calls.map((call) => call.args))).not.toContain('fake-live-fact-sentinel');
 });
 
+it('resolves TASK-037 delivery numbers without treating repository-owner digits as identities', async () => {
+  const { root, task } = await fixture('READY_FOR_REVIEW', 'Atlas');
+  await writeFile(
+    task,
+    (await readFile(task, 'utf8'))
+      .replace('- **Repository:** owner/repo', '- **Repository:** goikl2010-png/AI-Company')
+      .replace(
+        '- **GitHub Issue URL/number:** Issue #22',
+        '- **GitHub Issue URL/number:** https://github.com/goikl2010-png/AI-Company/issues/20 (#20)',
+      )
+      .replace(
+        '- **Pull Request URL/number:** PR #23',
+        '- **Pull Request URL/number:** https://github.com/goikl2010-png/AI-Company/pull/21 (#21)',
+      ),
+  );
+  const calls: string[][] = [];
+  const resolver = new GhCliGitHubFactResolver({
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    approvedIdentity: 'goikl2010-png',
+    parentEnvironment: { GH_TOKEN: 'fake-live-fact-sentinel', PATH: 'safe' },
+    run: async (_executable, args) => {
+      calls.push(args);
+      if (args[1] === 'user') return { login: 'goikl2010-png' };
+      if (args[1] === 'repos/goikl2010-png/AI-Company')
+        return { full_name: 'goikl2010-png/AI-Company' };
+      if (args[1] === 'repos/goikl2010-png/AI-Company/issues/20') return { state: 'open' };
+      if (args[1] === 'repos/goikl2010-png/AI-Company/pulls/21')
+        return {
+          state: 'open',
+          draft: false,
+          merged_at: null,
+          base: { ref: 'main' },
+          head: { ref: githubFacts.branch, sha: githubFacts.head },
+        };
+      throw new Error(`Unexpected GitHub path: ${args[1]}`);
+    },
+  });
+
+  await expect(
+    resolver.resolve(await readRunnerTask(root, 'TASK-016'), new AbortController().signal),
+  ).resolves.toMatchObject({ issue: 20, pr: 21 });
+  expect(calls.map((args) => args[1])).toContain('repos/goikl2010-png/AI-Company/issues/20');
+  expect(calls.map((args) => args[1])).toContain('repos/goikl2010-png/AI-Company/pulls/21');
+  expect(JSON.stringify(calls)).not.toContain('/pulls/2010');
+});
+
+it.each([
+  ['owner digits without an identity', 'PR goikl2010-png'],
+  [
+    'conflicting explicit and URL identities',
+    'PR #21 — `https://github.com/goikl2010-png/AI-Company/pull/22`',
+  ],
+])('fails closed for %s in delivery number fields', async (_name, value) => {
+  const { root, task } = await fixture();
+  await writeFile(
+    task,
+    (await readFile(task, 'utf8')).replace(
+      '- **Pull Request URL/number:** PR #23',
+      `- **Pull Request URL/number:** ${value}`,
+    ),
+  );
+  const resolver = new GhCliGitHubFactResolver({
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    parentEnvironment: { GH_TOKEN: 'fake-live-fact-sentinel', PATH: 'safe' },
+    run: async () => {
+      throw new Error('GitHub must not be called for an invalid delivery number.');
+    },
+  });
+
+  await expect(
+    resolver.resolve(await readRunnerTask(root, 'TASK-016'), new AbortController().signal),
+  ).rejects.toThrow('Malformed or conflicting Pull Request URL/number field.');
+});
+
 it('serializes a real concurrent race to one dispatch', async () => {
   const { root, stateDir } = await fixture();
   const slow = new FakeAgentDispatcher();

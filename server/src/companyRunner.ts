@@ -991,9 +991,19 @@ function taskDeliveryFields(task: RunnerTask): Partial<GitHubFacts> {
   };
   const oneNumber = (name: string): number | undefined => {
     const values = field(task.bytes, name).filter((value) => !/pending|n\/a/i.test(value));
-    const numbers = values.map((value) => value.match(/#?(\d+)/)?.[1]);
-    if (numbers.some((value) => value === undefined)) throw new Error(`Malformed ${name} field.`);
-    const unique = [...new Set(numbers.map(Number))];
+    const numbers = values.map((value) => {
+      const candidates = [
+        ...[...value.matchAll(/(?:^|[^A-Za-z0-9_])#(\d+)\b/g)].map((match) => match[1]),
+        ...[
+          ...value.matchAll(/https:\/\/github\.com\/[^/\s`]+\/[^/\s`]+\/(?:issues|pull)\/(\d+)\b/g),
+        ].map((match) => match[1]),
+        ...(/^\d+$/.test(value) ? [value] : []),
+      ].map(Number);
+      const unique = [...new Set(candidates)];
+      if (unique.length !== 1) throw new Error(`Malformed or conflicting ${name} field.`);
+      return unique[0];
+    });
+    const unique = [...new Set(numbers)];
     if (unique.length > 1) throw new Error(`Conflicting ${name} fields.`);
     return unique[0];
   };
