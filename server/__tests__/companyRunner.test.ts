@@ -1405,6 +1405,26 @@ it('terminates a real unresponsive child and proves it no longer survives', asyn
   expect(() => process.kill(pid, 0)).toThrow();
 });
 
+it('closes stdin for a real EOF-sensitive governed child', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'runner-eof-child-'));
+  roots.push(root);
+
+  const result = await spawnGovernedProcess(
+    process.execPath,
+    [
+      '-e',
+      `process.stdin.once('end',()=>process.stdout.write('stdin-eof'));process.stdin.resume()`,
+    ],
+    root,
+    5_000,
+    new AbortController().signal,
+    process.env,
+  );
+
+  expect(result).toMatchObject({ exitCode: 0, timedOut: false, launched: true });
+  expect(result.output).toBe('stdin-eof');
+});
+
 it.skipIf(process.platform !== 'win32')(
   'runs a governed .cmd child non-interactively with exact arguments',
   async () => {
