@@ -757,6 +757,7 @@ export async function spawnGovernedProcess(
     const child = spawn(invocation.executable, invocation.args, {
       cwd,
       env,
+      stdio: ['ignore', 'pipe', 'pipe'],
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       windowsHide: true,
     });
