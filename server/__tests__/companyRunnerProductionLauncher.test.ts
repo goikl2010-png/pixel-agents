@@ -616,9 +616,16 @@ describe('production Company Runner launcher', () => {
     await useCanonicalWindowsPathsForSharedGate(candidate);
     const counters = { github: 0, spawn: 0 };
 
-    await expect(launchProductionCompanyRunner(seams(candidate, counters))).resolves.toMatchObject({
-      outcome: 'DISPATCHED',
-    });
+    if (process.platform === 'win32')
+      await expect(
+        launchProductionCompanyRunner(seams(candidate, counters)),
+      ).resolves.toMatchObject({
+        outcome: 'DISPATCHED',
+      });
+    else
+      await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
+        'Production Company Runner root drifted from the canonical package.',
+      );
     expect(governanceGateProcess.calls[0]?.options.timeout).toBe(180_000);
   });
 
