@@ -14,6 +14,7 @@ const governanceGateProcess = vi.hoisted(() => ({
     options: { cwd?: string; timeout?: number; windowsHide?: boolean };
   }>,
   error: null as Error | null,
+  elapsedMs: 0,
   onInvoke: undefined as (() => void) | undefined,
 }));
 
@@ -31,11 +32,12 @@ vi.mock('child_process', async (importOriginal) => {
         return actual.execFile(executable, [...args], options, callback);
       governanceGateProcess.calls.push({ executable, args: [...args], options });
       governanceGateProcess.onInvoke?.();
+      const timedOut = governanceGateProcess.elapsedMs > (options.timeout ?? 0);
       queueMicrotask(() =>
         callback(
-          governanceGateProcess.error,
-          governanceGateProcess.error ? '' : 'GOVERNANCE INTEGRITY: PASSED',
-          governanceGateProcess.error?.message ?? '',
+          governanceGateProcess.error ?? (timedOut ? new Error('gate timed out') : null),
+          governanceGateProcess.error || timedOut ? '' : 'GOVERNANCE INTEGRITY: PASSED',
+          governanceGateProcess.error?.message ?? (timedOut ? 'gate timed out' : ''),
         ),
       );
       return undefined;
@@ -432,6 +434,7 @@ async function stoppedByCanonicalWindowsPathGate(
 beforeEach(() => {
   governanceGateProcess.calls.splice(0);
   governanceGateProcess.error = null;
+  governanceGateProcess.elapsedMs = 0;
   governanceGateProcess.onInvoke = undefined;
 });
 
@@ -602,9 +605,28 @@ describe('production Company Runner launcher', () => {
           '-Consumer',
           'CompanyRunner',
         ],
-        options: { cwd: candidate.root, timeout: 120_000, windowsHide: true },
+        options: { cwd: candidate.root, timeout: 180_000, windowsHide: true },
       },
     ]);
+  });
+
+  it('permits shared governance completion after 120 seconds within the bounded timeout', async () => {
+    governanceGateProcess.elapsedMs = 120_001;
+    const candidate = await fixture();
+    await useCanonicalWindowsPathsForSharedGate(candidate);
+    const counters = { github: 0, spawn: 0 };
+
+    if (process.platform === 'win32')
+      await expect(
+        launchProductionCompanyRunner(seams(candidate, counters)),
+      ).resolves.toMatchObject({
+        outcome: 'DISPATCHED',
+      });
+    else
+      await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
+        'Production Company Runner root drifted from the canonical package.',
+      );
+    expect(governanceGateProcess.calls[0]?.options.timeout).toBe(180_000);
   });
 
   it.skipIf(process.platform !== 'win32')(

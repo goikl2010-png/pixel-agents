@@ -170,7 +170,7 @@ const CREDENTIAL_CONTENT =
   /(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|bearer\s+\S+|-----BEGIN [^-]*PRIVATE KEY-----|(?:password|secret|token|private[_ -]?key)\s*[:=]\s*\S+)/i;
 const execFileAsync = promisify(execFile);
 const runnerCheckoutRoot = path.resolve(__dirname, '..');
-const GOVERNANCE_INTEGRITY_TIMEOUT_MS = 120_000;
+const GOVERNANCE_INTEGRITY_TIMEOUT_MS = 180_000;
 
 async function enforceSharedGovernanceIntegrityGate(
   companyRoot: string,
