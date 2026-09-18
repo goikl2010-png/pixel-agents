@@ -1645,7 +1645,7 @@ it('schema-v6 pins frozen TASK-037 Atlas scope while preserving governance-first
   Object.assign(candidate.config, {
     schema_version: '6',
     task_id: 'TASK-037',
-    target_state: 'READY_FOR_REVIEW',
+    target_state: 'REVIEW',
     target_owner: 'Atlas',
     codex_version: 'codex-cli 0.154.0',
     target_issue: 20,
@@ -1674,14 +1674,14 @@ it('schema-v6 pins frozen TASK-037 Atlas scope while preserving governance-first
   Object.assign(candidate.authorization, {
     schema_version: '6',
     task_id: 'TASK-037',
-    target_state: 'READY_FOR_REVIEW',
+    target_state: 'REVIEW',
     target_owner: 'Atlas',
     codex_version: 'codex-cli 0.154.0',
     executable: candidate.config.executable,
     approved_working_root: candidate.config.approved_working_root,
     output_schema: candidate.config.output_schema,
     argument_template: candidate.config.argument_template,
-    expected_effects: [...expectedEffectsForAuthorization('READY_FOR_REVIEW', 'Atlas', 'TASK-037')],
+    expected_effects: [...expectedEffectsForAuthorization('REVIEW', 'Atlas', 'TASK-037')],
   });
   const github = candidate.authorization.github as {
     issue: number;
@@ -1725,7 +1725,7 @@ it('schema-v6 pins frozen TASK-037 Atlas scope while preserving governance-first
       auth.task_id = 'TASK-038';
     },
     (auth: typeof candidate.authorization) => {
-      auth.target_state = 'REVIEW';
+      auth.target_state = 'READY_FOR_REVIEW';
     },
     (auth: typeof candidate.authorization) => {
       auth.target_sha256 = 'd'.repeat(64);
