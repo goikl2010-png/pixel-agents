@@ -178,7 +178,7 @@ export interface Canary005ActivationConfig {
   target_repository: 'goikl2010-png/AI-Company';
   target_issue: 20;
   target_pr: 21;
-  target_state: 'READY_FOR_REVIEW';
+  target_state: 'REVIEW';
   target_owner: 'Atlas';
   target_path: string;
   target_sha256: string;
@@ -460,7 +460,7 @@ export function validateCanary005ActivationConfig(value: unknown): Canary005Acti
     config.target_repository !== 'goikl2010-png/AI-Company' ||
     config.target_issue !== 20 ||
     config.target_pr !== 21 ||
-    config.target_state !== 'READY_FOR_REVIEW' ||
+    config.target_state !== 'REVIEW' ||
     config.target_owner !== 'Atlas' ||
     config.target_path !== 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-037.md' ||
     config.state_directory !== 'C:\\AI-Company\\.company-runner-state\\TASK-037' ||

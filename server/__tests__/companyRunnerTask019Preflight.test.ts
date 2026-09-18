@@ -475,7 +475,7 @@ it('accepts only the exact schema-v6 TASK-037 Atlas package', () => {
     target_repository: 'goikl2010-png/AI-Company',
     target_issue: 20,
     target_pr: 21,
-    target_state: 'READY_FOR_REVIEW',
+    target_state: 'REVIEW',
     target_owner: 'Atlas',
     target_path: `${root}\\tasks\\review\\codex-pixel-agents-037.md`,
     target_sha256: 'a'.repeat(64),
@@ -520,7 +520,7 @@ it('accepts only the exact schema-v6 TASK-037 Atlas package', () => {
   expect(config).toMatchObject({
     schema_version: '6',
     task_id: 'TASK-037',
-    target_state: 'READY_FOR_REVIEW',
+    target_state: 'REVIEW',
     target_owner: 'Atlas',
     codex_version: 'codex-cli 0.154.0',
   });
@@ -530,7 +530,7 @@ it('accepts only the exact schema-v6 TASK-037 Atlas package', () => {
     { ...config, task_id: 'TASK-038' },
     { ...config, target_issue: 50 },
     { ...config, target_pr: 22 },
-    { ...config, target_state: 'REVIEW' },
+    { ...config, target_state: 'READY_FOR_REVIEW' },
     { ...config, target_owner: 'Pixel' },
     { ...config, target_path: `${root}\\tasks\\active\\codex-pixel-agents-038.md` },
     { ...config, target_sha256: 'A'.repeat(64) },
