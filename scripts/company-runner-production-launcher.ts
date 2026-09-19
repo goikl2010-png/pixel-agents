@@ -11,8 +11,10 @@ import {
   GhCliGitHubFactResolver,
   type GitHubFacts,
   type GitHubPullRequestScope,
+  prepareRunnerReadiness,
   readRunnerTask,
   runCompanyOnce,
+  type RunnerReadinessResult,
   type RunOnceResult,
 } from '../server/src/companyRunner.js';
 import {
@@ -22,7 +24,7 @@ import {
 } from './company-runner-task-019-preflight.js';
 
 export interface GoiRedLaunchAuthorization {
-  schema_version: '1' | '2' | '3' | '4' | '5' | '6';
+  schema_version: '1' | '2' | '3' | '4' | '5' | '6' | '7';
   authorization: 'RED';
   authorized_by: 'Goi';
   task_id: string;
@@ -44,6 +46,7 @@ export interface GoiRedLaunchAuthorization {
   rollback: string;
   timeout_ms: number;
   stop_conditions: string[];
+  attempt_id?: string;
 }
 
 export interface ProductionLaunchOptions {
@@ -65,6 +68,13 @@ export interface ProductionLaunchOptions {
   globalCapabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   capabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   spawnProcess?: ConstructorParameters<typeof CodexAgentDispatcher>[0]['spawnProcess'];
+  checkoutProbe?: (checkoutRoot: string) => Promise<RunnerCheckoutProvenance>;
+}
+
+export interface ProductionReadinessOptions {
+  configPath: string;
+  readinessAuthorizationPath: string;
+  companyRoot: string;
   checkoutProbe?: (checkoutRoot: string) => Promise<RunnerCheckoutProvenance>;
 }
 
@@ -116,6 +126,7 @@ const AUTHORIZATION_KEYS = [
   'timeout_ms',
   'stop_conditions',
 ] as const;
+const AUTHORIZATION_V7_KEYS = [...AUTHORIZATION_KEYS, 'attempt_id'] as const;
 const GITHUB_KEYS = [
   'repository',
   'issue',
@@ -250,7 +261,9 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Production launch authorization is not an object.');
   const record = value as Record<string, unknown>;
-  if (!hasExactKeys(record, AUTHORIZATION_KEYS))
+  const authorizationKeys =
+    record.schema_version === '7' ? AUTHORIZATION_V7_KEYS : AUTHORIZATION_KEYS;
+  if (!hasExactKeys(record, authorizationKeys))
     throw new Error('Production launch authorization has missing or unknown fields.');
   if (!record.github || typeof record.github !== 'object' || Array.isArray(record.github))
     throw new Error('Production launch authorization GitHub facts are malformed.');
@@ -283,7 +296,7 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
       auth.target_owner === 'Atlas') ||
     (auth.target_state === 'APPROVED' && auth.target_owner === 'Alex');
   if (
-    !['1', '2', '3', '4', '5', '6'].includes(auth.schema_version ?? '') ||
+    !['1', '2', '3', '4', '5', '6', '7'].includes(auth.schema_version ?? '') ||
     auth.authorization !== 'RED' ||
     auth.authorized_by !== 'Goi' ||
     typeof auth.task_id !== 'string' ||
@@ -303,7 +316,10 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
     auth.rollback !== auth.rollback.trim() ||
     !Number.isInteger(auth.timeout_ms) ||
     (auth.timeout_ms ?? 0) < 1 ||
-    (auth.timeout_ms ?? 0) > 120_000
+    (auth.timeout_ms ?? 0) > 120_000 ||
+    (auth.schema_version === '7' &&
+      (typeof auth.attempt_id !== 'string' ||
+        !new RegExp(`^${auth.task_id}-attempt-[0-9]{3}$`).test(auth.attempt_id)))
   )
     throw new Error('Production launch authorization violates the exact RED contract.');
   const exactScope = auth.github.scope;
@@ -353,7 +369,8 @@ function assertExactAuthorization(
   if (
     (config.schema_version === '4' ||
       config.schema_version === '5' ||
-      config.schema_version === '6') &&
+      config.schema_version === '6' ||
+      config.schema_version === '7') &&
     (auth.target_state !== config.target_state ||
       auth.target_owner !== config.target_owner ||
       auth.target_sha256 !== config.target_sha256 ||
@@ -411,7 +428,7 @@ function assertExactAuthorization(
             ? 'task/TASK-033-runner-v1-activation-canary-003'
             : config.schema_version === '5'
               ? 'task/TASK-035-runner-v1-activation-canary-004'
-              : config.schema_version === '6'
+              : config.schema_version === '6' || config.schema_version === '7'
                 ? 'task/TASK-037-runner-v1-successor-activation-canary-005'
                 : 'task/TASK-020-reconcile-company-runner-roadmap') ||
     auth.github.issueState !== 'OPEN' ||
@@ -428,7 +445,8 @@ function assertExactAuthorization(
     config.schema_version === '3' ||
     config.schema_version === '4' ||
     config.schema_version === '5' ||
-    config.schema_version === '6'
+    config.schema_version === '6' ||
+    config.schema_version === '7'
   ) {
     const scope = auth.github.scope;
     const file = scope.files[0];
@@ -455,7 +473,7 @@ function assertExactAuthorization(
           ? ['documentation/runner-v1-activation-canary-003.md']
           : config.schema_version === '5'
             ? ['documentation/runner-v1-activation-canary-004.md']
-            : config.schema_version === '6'
+            : config.schema_version === '6' || config.schema_version === '7'
               ? ['documentation/runner-v1-activation-canary-005.md']
               : [...HISTORICAL_TASK020_FILES];
   if (
@@ -542,6 +560,51 @@ export async function probeManagedCodexAuthentication(
 
 export function hasManagedCodexAuthentication(status: string): boolean {
   return status.split(/\r?\n/).some((line) => /^Logged in(?:\s|$)/i.test(line.trim()));
+}
+
+/**
+ * Held pre-authorization control. This only appends owner-authorized recovery,
+ * circuit acknowledgement, and readiness evidence; it cannot acquire a lease
+ * or dispatch an agent.
+ */
+export async function prepareProductionCompanyRunnerReadiness(
+  options: ProductionReadinessOptions,
+): Promise<RunnerReadinessResult> {
+  const config = validateProductionRunnerConfig(await readJson(options.configPath));
+  if (config.schema_version !== '7' || config.active)
+    throw new Error('Production readiness requires the inactive schema-v7 package.');
+  const governance = (await readJson(
+    path.resolve(options.companyRoot, 'config', 'governance-integrity.json'),
+  )) as { activation_hold?: unknown };
+  if (governance.activation_hold !== true)
+    throw new Error('Production readiness is permitted only while activation_hold=true.');
+  await enforceSharedGovernanceIntegrityGate(options.companyRoot, config);
+  const provenance = await (options.checkoutProbe ?? probeRunnerCheckout)(runnerCheckoutRoot);
+  if (
+    path.resolve(provenance.root) !== runnerCheckoutRoot ||
+    provenance.dirty ||
+    provenance.head !== config.runner_commit
+  )
+    throw new Error('Runner checkout is not the exact clean schema-v7 implementation.');
+  if (path.resolve(options.companyRoot) !== path.resolve(config.approved_working_root))
+    throw new Error('Production Company Runner root drifted from the canonical package.');
+  const task = await readRunnerTask(options.companyRoot, config.task_id);
+  if (
+    task.state !== config.target_state ||
+    task.owner !== config.target_owner ||
+    path.resolve(task.path) !== path.resolve(config.target_path) ||
+    hashTaskBytes(task.bytes) !== config.target_sha256
+  )
+    throw new Error('Production readiness target identity or fingerprint drifted.');
+  return prepareRunnerReadiness({
+    stateDirectory: config.state_directory,
+    taskId: config.task_id,
+    authorization: await readJson(options.readinessAuthorizationPath),
+    expectedTargetSha256: config.target_sha256,
+    expectedRunnerCommit: config.runner_commit,
+    expectedConfigurationSha256: productionConfigurationSha256(config),
+    circuitFailureThreshold: config.circuit_failure_threshold,
+  });
 }
 
 function sanitizeResult(result: RunOnceResult): SanitizedProductionLaunchResult {
@@ -633,6 +696,7 @@ export async function launchProductionCompanyRunner(
     credentialEnvironmentVariable: config.credential_environment_variable,
     parentEnvironment: options.parentEnvironment,
     versionProbe: exactVersionProbe,
+    githubNetworkAccess: config.schema_version === '7',
     ...(options.globalCapabilityProbe
       ? { globalCapabilityProbe: options.globalCapabilityProbe }
       : {}),
@@ -651,6 +715,12 @@ export async function launchProductionCompanyRunner(
       leaseTtlMs: config.lease_ttl_ms,
       heartbeatMs: config.heartbeat_ms,
       circuitFailureThreshold: config.circuit_failure_threshold,
+      ...(authorization.schema_version === '7'
+        ? {
+            executionIdentity: authorization.attempt_id!,
+            readinessTargetSha256: authorization.target_sha256,
+          }
+        : {}),
       approvalSchemaPath: path.resolve(
         options.companyRoot,
         'docs/schemas/company-runner-approval-v1.schema.json',
