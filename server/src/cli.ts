@@ -10,7 +10,10 @@
 
 import * as path from 'path';
 
-import { launchProductionCompanyRunner } from '../../scripts/company-runner-production-launcher.js';
+import {
+  launchProductionCompanyRunner,
+  prepareProductionCompanyRunnerReadiness,
+} from '../../scripts/company-runner-production-launcher.js';
 import {
   discoverActionableTask,
   EMPLOYEE_IDENTITIES,
@@ -75,8 +78,10 @@ export interface CliArgs {
   runnerStatus?: boolean;
   runnerFake?: boolean;
   runnerProductionLaunch?: boolean;
+  runnerProductionReadiness?: boolean;
   runnerPreflightConfig?: string;
   runnerAuthorization?: string;
+  runnerReadinessAuthorization?: string;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -180,12 +185,18 @@ export function parseArgs(argv: string[]): CliArgs {
       args.runnerFake = true;
     } else if (argv[i] === '--runner-production-launch') {
       args.runnerProductionLaunch = true;
+    } else if (argv[i] === '--runner-production-readiness') {
+      args.runnerProductionReadiness = true;
     } else if (argv[i] === '--runner-preflight-config') {
       if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-preflight-config.');
       args.runnerPreflightConfig = argv[++i];
     } else if (argv[i] === '--runner-authorization') {
       if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-authorization.');
       args.runnerAuthorization = argv[++i];
+    } else if (argv[i] === '--runner-readiness-authorization') {
+      if (!argv[i + 1])
+        throw new CliArgsError('Missing value for --runner-readiness-authorization.');
+      args.runnerReadinessAuthorization = argv[++i];
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
@@ -214,10 +225,14 @@ Options:
   --runner-fake          Use deterministic fake adapter (test/rehearsal only)
   --runner-production-launch
                          Run the exact authorized TASK-019 production entry point once
+  --runner-production-readiness
+                         Record held, owner-authorized recovery readiness without dispatch
   --runner-preflight-config <path>
                          Canonical TASK-019 preflight package
   --runner-authorization <path>
                          Exact fresh Goi RED authorization artifact
+  --runner-readiness-authorization <path>
+                         Exact held recovery/readiness authorization artifact
   --help                Show this help message`);
       process.exit(0);
     }
@@ -235,20 +250,35 @@ export function validateRunnerCliMode(args: CliArgs): void {
     args.runnerFake ? '--runner-fake' : undefined,
   ].filter((option): option is string => option !== undefined);
 
-  if (args.runnerProductionLaunch && conflictingLegacyOptions.length > 0) {
+  if (
+    (args.runnerProductionLaunch || args.runnerProductionReadiness) &&
+    conflictingLegacyOptions.length > 0
+  ) {
     throw new CliArgsError(
-      `--runner-production-launch cannot be combined with legacy Runner options: ${conflictingLegacyOptions.join(', ')}.`,
+      `${args.runnerProductionLaunch ? '--runner-production-launch' : '--runner-production-readiness'} cannot be combined with legacy Runner options: ${conflictingLegacyOptions.join(', ')}.`,
     );
   }
 
+  if (args.runnerProductionLaunch && args.runnerProductionReadiness)
+    throw new CliArgsError('Production launch and held readiness are mutually exclusive.');
+
   if (
     !args.runnerProductionLaunch &&
-    (args.runnerPreflightConfig !== undefined || args.runnerAuthorization !== undefined)
+    !args.runnerProductionReadiness &&
+    (args.runnerPreflightConfig !== undefined ||
+      args.runnerAuthorization !== undefined ||
+      args.runnerReadinessAuthorization !== undefined)
   ) {
     throw new CliArgsError(
-      '--runner-preflight-config and --runner-authorization require --runner-production-launch.',
+      args.runnerReadinessAuthorization !== undefined
+        ? '--runner-readiness-authorization requires --runner-production-readiness.'
+        : '--runner-preflight-config and --runner-authorization require --runner-production-launch.',
     );
   }
+  if (args.runnerProductionReadiness && args.runnerAuthorization)
+    throw new CliArgsError('Held readiness does not accept a launch authorization.');
+  if (args.runnerProductionLaunch && args.runnerReadinessAuthorization)
+    throw new CliArgsError('Production launch does not accept a readiness authorization.');
 }
 
 // ── Main ──────────────────────────────────────────────────────
@@ -364,6 +394,34 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error(
         `[Pixel Agents] ${error instanceof Error ? error.message : 'Production launch failed closed.'}`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (args.runnerProductionReadiness) {
+    if (
+      !args.runnerPreflightConfig ||
+      !args.runnerReadinessAuthorization ||
+      !args.companyTasksRoot
+    ) {
+      console.error(
+        '[Pixel Agents] held readiness requires --company-tasks-root, --runner-preflight-config, and --runner-readiness-authorization.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const result = await prepareProductionCompanyRunnerReadiness({
+        companyRoot: args.companyTasksRoot,
+        configPath: args.runnerPreflightConfig,
+        readinessAuthorizationPath: args.runnerReadinessAuthorization,
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      console.error(
+        `[Pixel Agents] ${error instanceof Error ? error.message : 'Production readiness failed closed.'}`,
       );
       process.exitCode = 1;
     }

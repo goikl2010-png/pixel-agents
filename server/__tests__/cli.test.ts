@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it } from 'vitest';
 
-import { CliArgsError, parseArgs } from '../src/cli.js';
+import { CliArgsError, parseArgs, validateRunnerCliMode } from '../src/cli.js';
 
 const CLI_BUNDLE = path.join(__dirname, '../../dist/cli.js');
 const CLI_START_TIMEOUT_MS = 10_000;
@@ -81,6 +81,26 @@ describe('parseArgs', () => {
       runnerStateDirectory: 'C:\\temp\\runner',
       runnerDryRun: true,
     });
+  });
+  it('parses held Runner readiness and rejects combining it with production launch', () => {
+    const readiness = parseArgs([
+      '--runner-production-readiness',
+      '--runner-preflight-config',
+      'config.json',
+      '--runner-readiness-authorization',
+      'readiness.json',
+    ]);
+    expect(readiness).toMatchObject({
+      runnerProductionReadiness: true,
+      runnerPreflightConfig: 'config.json',
+      runnerReadinessAuthorization: 'readiness.json',
+    });
+    expect(() =>
+      validateRunnerCliMode({
+        ...readiness,
+        runnerProductionLaunch: true,
+      }),
+    ).toThrow('mutually exclusive');
   });
   it('parses read-only actionable-task discovery arguments', () => {
     expect(
