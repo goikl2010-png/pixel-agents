@@ -806,16 +806,45 @@ function validateCodexJsonlOutput(output: string): void {
       throw new Error('Codex returned malformed JSONL output.');
     }
   });
-  const messages = records.filter(
-    (record) =>
+  const messages = records.filter((record) => {
+    if (
       record.type === 'item.completed' &&
       record.item &&
       typeof record.item === 'object' &&
-      (record.item as Record<string, unknown>).type === 'agent_message',
-  );
+      (record.item as Record<string, unknown>).type === 'agent_message'
+    )
+      return true;
+    const payload = record.payload;
+    return (
+      record.type === 'event_msg' &&
+      payload !== null &&
+      typeof payload === 'object' &&
+      (payload as Record<string, unknown>).type === 'item_completed' &&
+      (payload as Record<string, unknown>).item !== null &&
+      typeof (payload as Record<string, unknown>).item === 'object' &&
+      ((payload as Record<string, unknown>).item as Record<string, unknown>).type === 'AgentMessage'
+    );
+  });
   if (messages.length !== 1)
     throw new Error('Codex JSONL output lacks one unique final agent message.');
-  const text = (messages[0].item as Record<string, unknown>).text;
+  let text: unknown;
+  if (messages[0].type === 'item.completed') {
+    text = (messages[0].item as Record<string, unknown>).text;
+  } else {
+    const item = (messages[0].payload as Record<string, unknown>).item as Record<string, unknown>;
+    const content = item.content;
+    if (
+      messages[0].phase !== 'final_answer' ||
+      !Array.isArray(content) ||
+      content.length !== 1 ||
+      content[0] === null ||
+      typeof content[0] !== 'object' ||
+      (content[0] as Record<string, unknown>).type !== 'Text' ||
+      typeof (content[0] as Record<string, unknown>).text !== 'string'
+    )
+      throw new Error('Codex final agent message envelope is malformed.');
+    text = (content[0] as Record<string, unknown>).text;
+  }
   let final: Record<string, unknown>;
   try {
     final = JSON.parse(String(text)) as Record<string, unknown>;
