@@ -845,12 +845,13 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
 
 it('grants the Atlas child only deterministic GitHub proxy domains without stdin approval', async () => {
   let capturedArgs: string[] = [];
+  const repositoryRoot = path.resolve(path.dirname(codexOutputSchemaPath), '../..');
   const dispatcher = new CodexAgentDispatcher({
     executable: 'codex',
     allowedExecutable: 'codex',
     outputSchemaPath: codexOutputSchemaPath,
-    workingRoot: path.resolve('.'),
-    approvedWorkingRoot: path.resolve('.'),
+    workingRoot: repositoryRoot,
+    approvedWorkingRoot: repositoryRoot,
     timeoutMs: 10,
     credentialEnvironmentVariable: 'GH_TOKEN',
     parentEnvironment: { GH_TOKEN: 'fake' },
@@ -900,7 +901,7 @@ it('grants the Atlas child only deterministic GitHub proxy domains without stdin
     '--sandbox',
     'workspace-write',
     '--cd',
-    path.resolve('.'),
+    repositoryRoot,
   ]);
   expect(capturedArgs.join(' ')).not.toContain('dangerously-bypass');
 });
