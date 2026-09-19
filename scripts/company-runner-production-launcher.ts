@@ -13,8 +13,8 @@ import {
   type GitHubPullRequestScope,
   prepareRunnerReadiness,
   readRunnerTask,
-  type RunnerReadinessResult,
   runCompanyOnce,
+  type RunnerReadinessResult,
   type RunOnceResult,
 } from '../server/src/companyRunner.js';
 import {
