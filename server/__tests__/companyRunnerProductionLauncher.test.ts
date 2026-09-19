@@ -1088,6 +1088,137 @@ describe('production Company Runner launcher', () => {
     expect(counters.spawn).toBe(1);
   });
 
+  it('accepts one current Codex terminal AgentMessage event', async () => {
+    const candidate = await fixture();
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+    options.spawnProcess = async () => ({
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake-process-seam',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: true,
+      output: `${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'AgentMessage',
+            content: [{ type: 'Text', text: JSON.stringify({ outcome: 'completed' }) }],
+          },
+        },
+        phase: 'final_answer',
+      })}\n`,
+    });
+
+    await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
+      outcome: 'DISPATCHED',
+    });
+  });
+
+  it.each([
+    ['missing', `${JSON.stringify({ type: 'turn.completed' })}\n`],
+    [
+      'duplicate current messages',
+      `${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'AgentMessage',
+            content: [{ type: 'Text', text: JSON.stringify({ outcome: 'completed' }) }],
+          },
+        },
+        phase: 'final_answer',
+      })}\n${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'AgentMessage',
+            content: [{ type: 'Text', text: JSON.stringify({ outcome: 'completed' }) }],
+          },
+        },
+        phase: 'final_answer',
+      })}\n`,
+    ],
+    [
+      'one legacy and one current message',
+      `${JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'agent_message', text: JSON.stringify({ outcome: 'completed' }) },
+      })}\n${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'AgentMessage',
+            content: [{ type: 'Text', text: JSON.stringify({ outcome: 'completed' }) }],
+          },
+        },
+        phase: 'final_answer',
+      })}\n`,
+    ],
+    [
+      'malformed current content',
+      `${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: { type: 'AgentMessage', content: [] },
+        },
+        phase: 'final_answer',
+      })}\n`,
+    ],
+    [
+      'non-final current phase',
+      `${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'AgentMessage',
+            content: [{ type: 'Text', text: JSON.stringify({ outcome: 'completed' }) }],
+          },
+        },
+        phase: 'commentary',
+      })}\n`,
+    ],
+    [
+      'schema-invalid current message',
+      `${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'item_completed',
+          item: {
+            type: 'AgentMessage',
+            content: [{ type: 'Text', text: JSON.stringify({ outcome: 'unknown' }) }],
+          },
+        },
+        phase: 'final_answer',
+      })}\n`,
+    ],
+    ['malformed JSONL', '{'],
+  ])('fails closed for %s final output', async (_case, output) => {
+    const candidate = await fixture();
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+    options.spawnProcess = async () => ({
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake-process-seam',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: true,
+      output,
+    });
+
+    await expect(launchProductionCompanyRunner(options)).rejects.toThrow();
+  });
+
   it('requires recovery after an ambiguous failed spawn and never respawns', async () => {
     const candidate = await fixture();
     const counters = { github: 0, spawn: 0 };
