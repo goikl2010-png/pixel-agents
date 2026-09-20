@@ -389,6 +389,7 @@ export interface CodexDispatcherOptions {
   outputSchemaPath: string;
   timeoutMs: number;
   credentialEnvironmentVariable: 'GH_TOKEN';
+  githubNetworkAccess?: boolean;
   parentEnvironment?: NodeJS.ProcessEnv;
   versionProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   globalCapabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
@@ -460,6 +461,16 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     const args = [
       '--ask-for-approval',
       'on-request',
+      ...(this.options.githubNetworkAccess
+        ? [
+            '-c',
+            'sandbox_workspace_write.network_access=true',
+            '-c',
+            'features.network_proxy.enabled=true',
+            '-c',
+            'features.network_proxy.domains={ "api.github.com" = "allow" }',
+          ]
+        : []),
       'exec',
       '--json',
       '--sandbox',
@@ -475,7 +486,7 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       args.includes('--approve-for-me') ||
       args[0] !== '--ask-for-approval' ||
       args[1] !== 'on-request' ||
-      args[2] !== 'exec'
+      args[this.options.githubNetworkAccess ? 8 : 2] !== 'exec'
     )
       throw new Error('Codex invocation contains a forbidden permission or bypass argument.');
     const result = await (this.options.spawnProcess ?? spawnGovernedProcess)(
@@ -1107,7 +1118,11 @@ export async function reconcileRunnerFacts(
   return { evidence, ...(github ? { github } : {}), permissionProfile: 'managed-on-request' };
 }
 
-export function decideRunnerAction(task: RunnerTask, facts?: ReconciledFacts): RunnerDecision {
+export function decideRunnerAction(
+  task: RunnerTask,
+  facts?: ReconciledFacts,
+  executionIdentity?: string,
+): RunnerDecision {
   const fingerprint = sha256(
     `${task.path.replace(/\\/g, '/')}\n${task.bytes}\n${canonicalFactBytes(facts)}`,
   );
@@ -1136,7 +1151,7 @@ export function decideRunnerAction(task: RunnerTask, facts?: ReconciledFacts): R
     reason = `${task.state} requires a consequential or unresolved Alex decision; Runner stops.`;
   }
   const dispatchId = sha256(
-    `company-runner-v1\n${task.id}\n${task.state}\n${task.owner}\n${action}\n${fingerprint}`,
+    `company-runner-v1\n${task.id}\n${task.state}\n${task.owner}\n${action}\n${fingerprint}${executionIdentity ? `\n${executionIdentity}` : ''}`,
   );
   return {
     schema_version: RUNNER_SCHEMA_VERSION,
@@ -1411,6 +1426,299 @@ interface LedgerEvent {
   details: Record<string, unknown>;
 }
 
+export interface RunnerReadinessAuthorization {
+  schema_version: '1';
+  authorization: 'RED';
+  authorized_by: 'Goi';
+  task_id: string;
+  attempt_id: string;
+  target_sha256: string;
+  runner_commit: string;
+  configuration_sha256: string;
+  recovery: {
+    attempt: number;
+    dispatch_id: string;
+    launch_event_hashes: string[];
+    evidence_path: string;
+    evidence_sha256: string;
+  };
+  circuit: { failure_event_hashes: string[] };
+}
+
+export interface RunnerReadinessResult {
+  task_id: string;
+  attempt_id: string;
+  recovery: 'RECORDED' | 'ALREADY_RECORDED' | 'NOT_REQUIRED';
+  circuit: 'ACKNOWLEDGED' | 'ALREADY_ACKNOWLEDGED' | 'NOT_REQUIRED';
+  outcome: 'READY';
+}
+
+const SHA256_VALUE = /^[0-9a-f]{64}$/;
+const SHA256_IDENTIFIER = /^sha256:[0-9a-f]{64}$/;
+const ATTEMPT_IDENTIFIER = /^TASK-[0-9]+-attempt-[0-9]{3}$/;
+
+function exactStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item) => typeof item === 'string' && item.length > 0) &&
+    new Set(value).size === value.length
+  );
+}
+
+function assertReadinessAuthorization(
+  value: unknown,
+): asserts value is RunnerReadinessAuthorization {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Runner readiness authorization must be an object.');
+  const authorization = value as Record<string, unknown>;
+  const exactKeys = [
+    'schema_version',
+    'authorization',
+    'authorized_by',
+    'task_id',
+    'attempt_id',
+    'target_sha256',
+    'runner_commit',
+    'configuration_sha256',
+    'recovery',
+    'circuit',
+  ];
+  if (Object.keys(authorization).sort().join('\n') !== exactKeys.sort().join('\n'))
+    throw new Error('Runner readiness authorization has missing or unknown fields.');
+  const recovery = authorization.recovery;
+  const circuit = authorization.circuit;
+  if (
+    !recovery ||
+    typeof recovery !== 'object' ||
+    Array.isArray(recovery) ||
+    Object.keys(recovery).sort().join('\n') !==
+      ['attempt', 'dispatch_id', 'launch_event_hashes', 'evidence_path', 'evidence_sha256']
+        .sort()
+        .join('\n') ||
+    !circuit ||
+    typeof circuit !== 'object' ||
+    Array.isArray(circuit) ||
+    Object.keys(circuit).sort().join('\n') !== ['failure_event_hashes'].sort().join('\n')
+  )
+    throw new Error('Runner readiness authorization controls are malformed.');
+  const recoveryRecord = recovery as Record<string, unknown>;
+  const circuitRecord = circuit as Record<string, unknown>;
+  if (
+    authorization.schema_version !== '1' ||
+    authorization.authorization !== 'RED' ||
+    authorization.authorized_by !== 'Goi' ||
+    typeof authorization.task_id !== 'string' ||
+    typeof authorization.attempt_id !== 'string' ||
+    !ATTEMPT_IDENTIFIER.test(authorization.attempt_id) ||
+    !authorization.attempt_id.startsWith(`${authorization.task_id}-attempt-`) ||
+    typeof authorization.target_sha256 !== 'string' ||
+    !SHA256_VALUE.test(authorization.target_sha256) ||
+    typeof authorization.runner_commit !== 'string' ||
+    !/^[0-9a-f]{40}$/.test(authorization.runner_commit) ||
+    typeof authorization.configuration_sha256 !== 'string' ||
+    !SHA256_VALUE.test(authorization.configuration_sha256) ||
+    !Number.isInteger(recoveryRecord.attempt) ||
+    (recoveryRecord.attempt as number) < 1 ||
+    typeof recoveryRecord.dispatch_id !== 'string' ||
+    !SHA256_IDENTIFIER.test(recoveryRecord.dispatch_id) ||
+    !exactStringArray(recoveryRecord.launch_event_hashes) ||
+    !recoveryRecord.launch_event_hashes.every((hash) => SHA256_IDENTIFIER.test(hash)) ||
+    typeof recoveryRecord.evidence_path !== 'string' ||
+    !path.isAbsolute(recoveryRecord.evidence_path) ||
+    typeof recoveryRecord.evidence_sha256 !== 'string' ||
+    !SHA256_VALUE.test(recoveryRecord.evidence_sha256) ||
+    !exactStringArray(circuitRecord.failure_event_hashes) ||
+    !circuitRecord.failure_event_hashes.every((hash) => SHA256_IDENTIFIER.test(hash))
+  )
+    throw new Error('Runner readiness authorization violates the exact RED contract.');
+}
+
+function unresolvedDispatches(events: LedgerEvent[]): Map<string, LedgerEvent[]> {
+  const resolved = new Set(
+    events
+      .filter((event) => event.type === 'dispatch_result' || event.type === 'recovery_resolution')
+      .map((event) => event.dispatch_id),
+  );
+  const unresolved = new Map<string, LedgerEvent[]>();
+  for (const event of events) {
+    if (
+      !['dispatch_intent', 'dispatch_start'].includes(event.type) ||
+      resolved.has(event.dispatch_id)
+    )
+      continue;
+    unresolved.set(event.dispatch_id, [...(unresolved.get(event.dispatch_id) ?? []), event]);
+  }
+  return unresolved;
+}
+
+function unacknowledgedFailures(events: LedgerEvent[]): LedgerEvent[] {
+  const lastAcknowledgement = [...events]
+    .reverse()
+    .find((event) => event.type === 'circuit_acknowledgement');
+  return events.filter(
+    (event) =>
+      event.sequence > (lastAcknowledgement?.sequence ?? 0) &&
+      (event.type === 'failure' || event.type === 'circuit_break'),
+  );
+}
+
+export async function prepareRunnerReadiness(options: {
+  stateDirectory: string;
+  taskId: string;
+  authorization: unknown;
+  expectedTargetSha256: string;
+  expectedRunnerCommit: string;
+  expectedConfigurationSha256: string;
+  circuitFailureThreshold?: number;
+}): Promise<RunnerReadinessResult> {
+  assertReadinessAuthorization(options.authorization);
+  const authorization = options.authorization;
+  if (
+    authorization.task_id !== options.taskId ||
+    authorization.target_sha256 !== options.expectedTargetSha256 ||
+    authorization.runner_commit !== options.expectedRunnerCommit ||
+    authorization.configuration_sha256 !== options.expectedConfigurationSha256
+  )
+    throw new Error('Runner readiness authorization drifted from the held target.');
+  const ledger = new RunnerLedger(path.join(options.stateDirectory, `${options.taskId}.jsonl`));
+  let events = await ledger.read();
+  const authorizationHash = sha256(`${JSON.stringify(authorization, null, 2)}\n`);
+  const completed = events.find(
+    (event) =>
+      event.type === 'readiness' &&
+      event.outcome === 'READY' &&
+      event.details.attempt_id === authorization.attempt_id,
+  );
+  if (completed) {
+    if (completed.details.authorization_sha256 !== authorizationHash)
+      throw new Error('Runner readiness attempt already exists under different authority.');
+    return {
+      task_id: options.taskId,
+      attempt_id: authorization.attempt_id,
+      recovery: 'ALREADY_RECORDED',
+      circuit: 'ALREADY_ACKNOWLEDGED',
+      outcome: 'READY',
+    };
+  }
+  const unresolved = unresolvedDispatches(events);
+  const threshold = options.circuitFailureThreshold ?? 3;
+  const failures = unacknowledgedFailures(events);
+  const failureHashes = failures.map((event) => event.event_hash);
+  if (
+    failures.length >= threshold &&
+    JSON.stringify(failureHashes) !== JSON.stringify(authorization.circuit.failure_event_hashes)
+  )
+    throw new Error('Runner readiness circuit acknowledgement drifted.');
+  if (failures.length < threshold && authorization.circuit.failure_event_hashes.length > 0)
+    throw new Error('Runner readiness circuit acknowledgement is unnecessary or stale.');
+  let recovery: RunnerReadinessResult['recovery'] = 'NOT_REQUIRED';
+  if (unresolved.size > 0) {
+    if (unresolved.size !== 1 || !unresolved.has(authorization.recovery.dispatch_id))
+      throw new Error(
+        'Runner readiness authorization does not uniquely cover unresolved dispatch history.',
+      );
+    const launchHashes = unresolved
+      .get(authorization.recovery.dispatch_id)!
+      .map((event) => event.event_hash);
+    if (JSON.stringify(launchHashes) !== JSON.stringify(authorization.recovery.launch_event_hashes))
+      throw new Error('Runner readiness recovery event hashes drifted.');
+    const evidenceBytes = await fs.readFile(authorization.recovery.evidence_path);
+    if (
+      createHash('sha256').update(evidenceBytes).digest('hex') !==
+      authorization.recovery.evidence_sha256
+    )
+      throw new Error('Runner readiness recovery evidence hash drifted.');
+    const evidence = JSON.parse(evidenceBytes.toString('utf8')) as Record<string, unknown>;
+    const attempt = Number(authorization.attempt_id.match(/attempt-([0-9]{3})$/)?.[1]);
+    if (
+      evidence.task_id !== options.taskId ||
+      evidence.attempt !== authorization.recovery.attempt ||
+      authorization.recovery.attempt >= attempt ||
+      evidence.dispatch_id !== authorization.recovery.dispatch_id ||
+      evidence.authorization_consumed !== true ||
+      evidence.retry_performed !== false
+    )
+      throw new Error(
+        'Runner readiness recovery evidence does not prove the consumed prior attempt.',
+      );
+    await ledger.append({
+      type: 'recovery_resolution',
+      run_id: `readiness:${authorization.attempt_id}`,
+      dispatch_id: authorization.recovery.dispatch_id,
+      task_fingerprint: authorization.target_sha256,
+      outcome: 'RESOLVED',
+      details: {
+        attempt_id: authorization.attempt_id,
+        authorization_sha256: authorizationHash,
+        evidence_path: authorization.recovery.evidence_path,
+        evidence_sha256: authorization.recovery.evidence_sha256,
+        launch_event_hashes: authorization.recovery.launch_event_hashes,
+      },
+    });
+    recovery = 'RECORDED';
+    events = await ledger.read();
+  } else if (authorization.recovery.launch_event_hashes.length > 0) {
+    throw new Error('Runner readiness recovery authorization is unnecessary or stale.');
+  }
+  let circuit: RunnerReadinessResult['circuit'] = 'NOT_REQUIRED';
+  if (failures.length >= threshold) {
+    await ledger.append({
+      type: 'circuit_acknowledgement',
+      run_id: `readiness:${authorization.attempt_id}`,
+      dispatch_id: authorization.recovery.dispatch_id,
+      task_fingerprint: authorization.target_sha256,
+      outcome: 'ACKNOWLEDGED',
+      details: {
+        attempt_id: authorization.attempt_id,
+        authorization_sha256: authorizationHash,
+        failure_event_hashes: failureHashes,
+      },
+    });
+    circuit = 'ACKNOWLEDGED';
+    events = await ledger.read();
+  }
+  if (unresolvedDispatches(events).size > 0 || unacknowledgedFailures(events).length >= threshold)
+    throw new Error('Runner readiness remains blocked after authorized recovery controls.');
+  await ledger.append({
+    type: 'readiness',
+    run_id: `readiness:${authorization.attempt_id}`,
+    dispatch_id: authorization.recovery.dispatch_id,
+    task_fingerprint: authorization.target_sha256,
+    outcome: 'READY',
+    details: { attempt_id: authorization.attempt_id, authorization_sha256: authorizationHash },
+  });
+  return {
+    task_id: options.taskId,
+    attempt_id: authorization.attempt_id,
+    recovery,
+    circuit,
+    outcome: 'READY',
+  };
+}
+
+async function assertRunnerReadiness(
+  ledger: RunnerLedger,
+  attemptId: string,
+  targetSha256: string,
+  circuitFailureThreshold: number,
+): Promise<void> {
+  if (!ATTEMPT_IDENTIFIER.test(attemptId)) throw new Error('Runner attempt identity is malformed.');
+  const events = await ledger.read();
+  const readiness = events.filter(
+    (event) =>
+      event.type === 'readiness' &&
+      event.outcome === 'READY' &&
+      event.details.attempt_id === attemptId &&
+      event.task_fingerprint === targetSha256,
+  );
+  if (readiness.length !== 1)
+    throw new Error('Runner held pre-authorization readiness is absent or ambiguous.');
+  if (unresolvedDispatches(events).size > 0)
+    throw new Error('Runner held pre-authorization recovery remains unresolved.');
+  if (unacknowledgedFailures(events).length >= circuitFailureThreshold)
+    throw new Error('Runner held pre-authorization circuit is not acknowledged.');
+}
+
 export class RunnerLedger {
   constructor(readonly file: string) {}
   async read(): Promise<LedgerEvent[]> {
@@ -1595,6 +1903,8 @@ export interface RunOnceOptions {
   circuitFailureThreshold?: number;
   signal?: AbortSignal;
   approvalSchemaPath?: string;
+  executionIdentity?: string;
+  readinessTargetSha256?: string;
 }
 export interface RunOnceResult {
   run_id: string;
@@ -1641,17 +1951,28 @@ async function verifyObservedTransition(
   const evidenceStat = await fs.stat(path.resolve(companyRoot, evidence.path));
   if (evidenceStat.mtimeMs > taskStat.mtimeMs)
     throw new Error('Transition evidence was saved after the authoritative transition.');
-  const transition = `${before.state} to ${after.state}`;
-  if (!evidence.bytes.includes(expectedActor) || !evidence.bytes.includes(transition))
+  if (!evidence.bytes.includes(expectedActor) || !evidence.bytes.includes(after.state))
     throw new Error('Transition evidence has the wrong role or transition type.');
   if (facts.github && !evidence.bytes.includes(facts.github.head))
     throw new Error('Transition evidence does not cover the current Pull Request head.');
-  const matchingRows = [...after.bytes.matchAll(/^\|[^\n]+\|/gm)].filter(
-    ([row]) =>
-      row.includes(expectedActor) &&
-      row.includes(`\`${before.state}\` to \`${after.state}\``) &&
-      row.includes(evidence.path),
-  );
+  const matchingRows = [...after.bytes.matchAll(/^\|[^\n]+\|/gm)].filter(([row]) => {
+    const cells = row
+      .split('|')
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    if (cells.length !== 6 || cells[1] !== expectedActor || cells[2] !== after.owner) return false;
+    const statePattern = new RegExp(
+      `(?:^|[^A-Z_])(${[...LIFECYCLE_STATES].sort((a, b) => b.length - a.length).join('|')})(?=$|[^A-Z_])`,
+      'g',
+    );
+    const states = [...cells[3].replace(/`/g, '').matchAll(statePattern)].map((match) => match[1]);
+    return (
+      states.length === 2 &&
+      states[0] === before.state &&
+      states[1] === after.state &&
+      cells[4].includes(evidence.path)
+    );
+  });
   if (matchingRows.length !== 1)
     throw new Error('Authoritative task lacks one unique role-owned transition handoff row.');
 }
@@ -1659,8 +1980,15 @@ async function verifyObservedTransition(
 export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const runId = randomUUID();
   const task = await readRunnerTask(options.companyRoot, options.taskId);
-  let decision = decideRunnerAction(task);
+  let decision = decideRunnerAction(task, undefined, options.executionIdentity);
   const ledger = new RunnerLedger(path.join(options.stateDirectory, `${task.id}.jsonl`));
+  if (options.executionIdentity)
+    await assertRunnerReadiness(
+      ledger,
+      options.executionIdentity,
+      options.readinessTargetSha256 ?? '',
+      options.circuitFailureThreshold ?? 3,
+    );
   const append = (type: string, outcome: string, details: Record<string, unknown> = {}) =>
     ledger.append({
       type,
@@ -1702,7 +2030,7 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       return { run_id: runId, outcome: 'NO_ACTION_TERMINAL', decision };
     }
     const facts = await reconcileRunnerFacts(options.companyRoot, task, options.githubResolver);
-    decision = decideRunnerAction(task, facts);
+    decision = decideRunnerAction(task, facts, options.executionIdentity);
     await lease.bind(runId, decision);
     await append('lease_identity', 'BOUND');
     const previous = await ledger.read();
@@ -1727,9 +2055,7 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       await append('decision', 'NO_ACTION_UNCHANGED');
       return { run_id: runId, outcome: 'NO_ACTION_UNCHANGED', decision };
     }
-    const failureCount = previous.filter(
-      (event) => event.type === 'failure' || event.type === 'circuit_break',
-    ).length;
+    const failureCount = unacknowledgedFailures(previous).length;
     if (failureCount >= (options.circuitFailureThreshold ?? 3)) {
       await append('circuit_break', 'OPEN', { failure_count: failureCount });
       return { run_id: runId, outcome: 'FAILED', decision };
@@ -1740,7 +2066,7 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       refreshedTask,
       options.githubResolver,
     );
-    const refreshed = decideRunnerAction(refreshedTask, refreshedFacts);
+    const refreshed = decideRunnerAction(refreshedTask, refreshedFacts, options.executionIdentity);
     if (refreshed.dispatch_id !== decision.dispatch_id) {
       await append('failure', 'STALE_STATE');
       return { run_id: runId, outcome: 'FAILED', decision };

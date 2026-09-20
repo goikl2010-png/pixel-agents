@@ -13,6 +13,7 @@ import {
   validateCanary003ActivationConfig,
   validateCanary004ActivationConfig,
   validateCanary005ActivationConfig,
+  validateCanary005ReadinessConfig,
   validateControlledActivationConfig,
   validateSuccessorActivationConfig,
   validateTask019PreflightConfig,
@@ -525,6 +526,36 @@ it('accepts only the exact schema-v6 TASK-037 Atlas package', () => {
     codex_version: 'codex-cli 0.154.0',
   });
   expect(productionConfigurationSha256(config)).toMatch(/^[0-9a-f]{64}$/);
+  const readiness = validateCanary005ReadinessConfig({
+    ...config,
+    schema_version: '7',
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      '-c',
+      'sandbox_workspace_write.network_access=true',
+      '-c',
+      'features.network_proxy.enabled=true',
+      '-c',
+      'features.network_proxy.domains={ "api.github.com" = "allow" }',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      root,
+      '--output-schema',
+      schema,
+      '<JSON_HANDOFF_PACKET>',
+    ],
+  });
+  expect(readiness.schema_version).toBe('7');
+  expect(() =>
+    validateCanary005ReadinessConfig({
+      ...readiness,
+      argument_template: config.argument_template,
+    }),
+  ).toThrow('argument template');
   for (const candidate of [
     { ...config, schema_version: '5' },
     { ...config, task_id: 'TASK-038' },

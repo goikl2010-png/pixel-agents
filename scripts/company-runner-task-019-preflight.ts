@@ -204,13 +204,21 @@ export interface Canary005ActivationConfig {
   argument_template: string[];
 }
 
+export interface Canary005ReadinessConfig extends Omit<
+  Canary005ActivationConfig,
+  'schema_version'
+> {
+  schema_version: '7';
+}
+
 export type ProductionRunnerConfig =
   | Task019PreflightConfig
   | ControlledActivationConfig
   | SuccessorActivationConfig
   | Canary003ActivationConfig
   | Canary004ActivationConfig
-  | Canary005ActivationConfig;
+  | Canary005ActivationConfig
+  | Canary005ReadinessConfig;
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const GIT_SHA = /^[0-9a-f]{40}$/;
@@ -276,9 +284,21 @@ function assertCommonConfiguration(config: Record<string, unknown>, label: strin
       throw new Error(`${label} ${field} must be a lowercase 40-character Git commit.`);
   if (JSON.stringify(config.required_exec_capabilities) !== JSON.stringify(REQUIRED_EXEC))
     throw new Error(`${label} exec capability contract is incomplete or reordered.`);
+  const networkArguments =
+    config.schema_version === '7'
+      ? [
+          '-c',
+          'sandbox_workspace_write.network_access=true',
+          '-c',
+          'features.network_proxy.enabled=true',
+          '-c',
+          'features.network_proxy.domains={ "api.github.com" = "allow" }',
+        ]
+      : [];
   const expectedArguments = [
     '--ask-for-approval',
     'on-request',
+    ...networkArguments,
     'exec',
     '--json',
     '--sandbox',
@@ -480,6 +500,39 @@ export function validateCanary005ActivationConfig(value: unknown): Canary005Acti
   return config as unknown as Canary005ActivationConfig;
 }
 
+export function validateCanary005ReadinessConfig(value: unknown): Canary005ReadinessConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Canary 005 readiness configuration must be an object.');
+  const config = value as Record<string, unknown>;
+  assertCommonConfiguration(config, 'Canary 005 readiness');
+  if (
+    config.schema_version !== '7' ||
+    config.active !== false ||
+    config.mode !== 'run-once' ||
+    config.task_id !== 'TASK-037' ||
+    config.target_repository !== 'goikl2010-png/AI-Company' ||
+    config.target_issue !== 20 ||
+    config.target_pr !== 21 ||
+    config.target_state !== 'REVIEW' ||
+    config.target_owner !== 'Atlas' ||
+    config.target_path !== 'C:\\AI-Company\\tasks\\review\\codex-pixel-agents-037.md' ||
+    config.state_directory !== 'C:\\AI-Company\\.company-runner-state\\TASK-037' ||
+    config.stop_file !== 'C:\\AI-Company\\.company-runner-state\\TASK-037\\STOP' ||
+    config.max_dispatches !== 1 ||
+    config.dispatcher !== 'codex' ||
+    config.approval_policy !== 'on-request' ||
+    config.codex_version !== 'codex-cli 0.154.0' ||
+    config.timeout_ms !== 120_000 ||
+    config.lease_ttl_ms !== 30_000 ||
+    config.heartbeat_ms !== 10_000 ||
+    config.workflow_mutation_adapter !== false ||
+    config.credential_environment_variable !== 'GH_TOKEN' ||
+    config.required_global_capability !== '--ask-for-approval on-request'
+  )
+    throw new Error('Canary 005 readiness configuration violates a fixed run-once invariant.');
+  return config as unknown as Canary005ReadinessConfig;
+}
+
 export function validateProductionRunnerConfig(value: unknown): ProductionRunnerConfig {
   if ((value as { schema_version?: unknown } | null)?.schema_version === '2')
     return validateControlledActivationConfig(value);
@@ -491,6 +544,8 @@ export function validateProductionRunnerConfig(value: unknown): ProductionRunner
     return validateCanary004ActivationConfig(value);
   if ((value as { schema_version?: unknown } | null)?.schema_version === '6')
     return validateCanary005ActivationConfig(value);
+  if ((value as { schema_version?: unknown } | null)?.schema_version === '7')
+    return validateCanary005ReadinessConfig(value);
   return validateTask019PreflightConfig(value);
 }
 

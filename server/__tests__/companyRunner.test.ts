@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'fs/promises';
 import { hostname, tmpdir } from 'os';
 import * as path from 'path';
@@ -13,6 +14,7 @@ import {
   type GitHubFactResolver,
   isLegalRunnerTransition,
   preflightGovernedGitHubAuthentication,
+  prepareRunnerReadiness,
   readRunnerTask,
   reconcileRunnerFacts,
   runCompany,
@@ -841,6 +843,69 @@ it('keeps the sentinel only in child env, never args, prompt, result, or errors'
   expect(JSON.stringify(result)).not.toContain(sentinel);
 });
 
+it('grants the Atlas child only deterministic GitHub proxy domains without stdin approval', async () => {
+  let capturedArgs: string[] = [];
+  const repositoryRoot = path.resolve(path.dirname(codexOutputSchemaPath), '../..');
+  const dispatcher = new CodexAgentDispatcher({
+    executable: 'codex',
+    allowedExecutable: 'codex',
+    outputSchemaPath: codexOutputSchemaPath,
+    workingRoot: repositoryRoot,
+    approvedWorkingRoot: repositoryRoot,
+    timeoutMs: 10,
+    credentialEnvironmentVariable: 'GH_TOKEN',
+    parentEnvironment: { GH_TOKEN: 'fake' },
+    githubNetworkAccess: true,
+    versionProbe: async () => 'codex-cli 0.148.0',
+    globalCapabilityProbe: async () =>
+      '-a, --ask-for-approval <APPROVAL_POLICY>\n- on-request: Ask when the model requests approval',
+    capabilityProbe: async () =>
+      '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE>',
+    spawnProcess: async (_executable, args) => {
+      capturedArgs = args;
+      return {
+        exitCode: 0,
+        timedOut: false,
+        model: 'fake',
+        inputTokens: 0,
+        outputTokens: 0,
+        launched: true,
+        output:
+          '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"outcome\\":\\"completed\\"}"}}\n',
+      };
+    },
+  });
+  await dispatcher.dispatch(
+    {
+      schema_version: '1',
+      task: { id: 'TASK-016', path: 'task.md', fingerprint: 'sha256:fake' },
+      role: 'Atlas',
+      state: 'REVIEW',
+      dispatch_id: 'sha256:dispatch',
+      evidence: [],
+      instruction: 'safe',
+    },
+    new AbortController().signal,
+  );
+  expect(capturedArgs.slice(0, 14)).toEqual([
+    '--ask-for-approval',
+    'on-request',
+    '-c',
+    'sandbox_workspace_write.network_access=true',
+    '-c',
+    'features.network_proxy.enabled=true',
+    '-c',
+    'features.network_proxy.domains={ "api.github.com" = "allow" }',
+    'exec',
+    '--json',
+    '--sandbox',
+    'workspace-write',
+    '--cd',
+    repositoryRoot,
+  ]);
+  expect(capturedArgs.join(' ')).not.toContain('dangerously-bypass');
+});
+
 it('refuses absent credential before probe or child launch', async () => {
   let probes = 0;
   let launches = 0;
@@ -1175,6 +1240,41 @@ it('accepts a transition only with unique preceding role-owned current-head evid
   ).toBe(true);
 });
 
+it('accepts a canonical REVIEW to APPROVED transition independent of textual separator', async () => {
+  const { root, task, stateDir } = await fixture('REVIEW', 'Atlas');
+  const dispatcher = new FakeAgentDispatcher();
+  dispatcher.dispatch = async (packet) => {
+    dispatcher.calls.push(packet);
+    const evidence = 'documentation/qa/atlas-review.md';
+    await writeFile(path.join(root, evidence), `Atlas\nAPPROVED\n${githubFacts.head}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const next = (await readFile(task, 'utf8'))
+      .replace('**Owner:** Atlas', '**Owner:** Alex')
+      .replace('**Current state:** REVIEW', '**Current state:** APPROVED')
+      .concat(
+        `- **New evidence:** \`${evidence}\`\n| now | Atlas | Alex | \`REVIEW\` → \`APPROVED\` | ${evidence} | closure |\n`,
+      );
+    await writeFile(task, next);
+    return {
+      exitCode: 0,
+      timedOut: false,
+      model: 'fake',
+      inputTokens: 0,
+      outputTokens: 0,
+      launched: true,
+    };
+  };
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher,
+      githubResolver,
+    }),
+  ).resolves.toMatchObject({ outcome: 'DISPATCHED' });
+});
+
 it('refuses a transition supported only by historical evidence', async () => {
   const { root, task, stateDir } = await fixture();
   const dispatcher = new FakeAgentDispatcher();
@@ -1308,6 +1408,112 @@ it('opens the persisted circuit after restart and performs zero dispatch', async
   expect(result.outcome).toBe('FAILED');
   expect(fake.calls).toHaveLength(0);
   expect((await runnerStatus(root, 'TASK-016', stateDir)).circuit).toBe('open');
+});
+
+it('checks fresh-attempt readiness before acquiring a lease or dispatching', async () => {
+  const { root, stateDir } = await fixture();
+  const fake = new FakeAgentDispatcher();
+  await expect(
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher: fake,
+      githubResolver,
+      executionIdentity: 'TASK-016-attempt-013',
+      readinessTargetSha256: 'a'.repeat(64),
+    }),
+  ).rejects.toThrow('readiness is absent or ambiguous');
+  await expect(readFile(path.join(stateDir, 'leases', 'TASK-016.lock'))).rejects.toThrow();
+  expect(fake.calls).toHaveLength(0);
+});
+
+it('records authorized recovery and circuit acknowledgement before a fresh-attempt dispatch', async () => {
+  const { root, stateDir } = await fixture();
+  const task = await readRunnerTask(root, 'TASK-016');
+  const oldDecision = decideRunnerAction(
+    task,
+    await reconcileRunnerFacts(root, task, githubResolver),
+  );
+  const ledger = new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl'));
+  const launch = await ledger.append({
+    type: 'dispatch_start',
+    run_id: 'historical',
+    dispatch_id: oldDecision.dispatch_id,
+    task_fingerprint: oldDecision.state_fingerprint,
+    outcome: 'STARTED',
+    details: {},
+  });
+  const failures = [];
+  for (let index = 0; index < 3; index++)
+    failures.push(
+      await ledger.append({
+        type: 'failure',
+        run_id: `failed-${index}`,
+        dispatch_id: `sha256:${String(index).repeat(64)}`,
+        task_fingerprint: oldDecision.state_fingerprint,
+        outcome: 'FAILED',
+        details: {},
+      }),
+    );
+  const evidencePath = path.join(root, 'attempt-011.json');
+  const evidence = `${JSON.stringify(
+    {
+      task_id: 'TASK-016',
+      attempt: 11,
+      dispatch_id: oldDecision.dispatch_id,
+      authorization_consumed: true,
+      retry_performed: false,
+    },
+    null,
+    2,
+  )}\n`;
+  await writeFile(evidencePath, evidence);
+  const authorization = {
+    schema_version: '1',
+    authorization: 'RED',
+    authorized_by: 'Goi',
+    task_id: 'TASK-016',
+    attempt_id: 'TASK-016-attempt-013',
+    target_sha256: 'a'.repeat(64),
+    runner_commit: 'b'.repeat(40),
+    configuration_sha256: 'c'.repeat(64),
+    recovery: {
+      attempt: 11,
+      dispatch_id: oldDecision.dispatch_id,
+      launch_event_hashes: [launch.event_hash],
+      evidence_path: evidencePath,
+      evidence_sha256: createHash('sha256').update(evidence).digest('hex'),
+    },
+    circuit: { failure_event_hashes: failures.map((event) => event.event_hash) },
+  };
+  await expect(
+    prepareRunnerReadiness({
+      stateDirectory: stateDir,
+      taskId: 'TASK-016',
+      authorization,
+      expectedTargetSha256: 'a'.repeat(64),
+      expectedRunnerCommit: 'b'.repeat(40),
+      expectedConfigurationSha256: 'c'.repeat(64),
+    }),
+  ).resolves.toMatchObject({ recovery: 'RECORDED', circuit: 'ACKNOWLEDGED', outcome: 'READY' });
+  const fake = new FakeAgentDispatcher();
+  const result = await runCompanyOnce({
+    companyRoot: root,
+    taskId: 'TASK-016',
+    stateDirectory: stateDir,
+    dispatcher: fake,
+    githubResolver,
+    executionIdentity: 'TASK-016-attempt-013',
+    readinessTargetSha256: 'a'.repeat(64),
+  });
+  expect(result.outcome).toBe('DISPATCHED');
+  expect(result.decision.dispatch_id).not.toBe(oldDecision.dispatch_id);
+  expect(fake.calls).toHaveLength(1);
+  const events = await ledger.read();
+  expect(events.filter((event) => event.type === 'recovery_resolution')).toHaveLength(1);
+  expect(events.filter((event) => event.type === 'circuit_acknowledgement')).toHaveLength(1);
+  expect(events.filter((event) => event.type === 'readiness')).toHaveLength(1);
 });
 
 it('fails closed when heartbeat persistence is lost during dispatch', async () => {
