@@ -554,13 +554,17 @@ describe('production Company Runner CLI mode boundary', () => {
     expect(productionCall).toBeGreaterThan(0);
     expect(cliSource.indexOf('runCompanyOnce({', productionCall)).toBe(-1);
     const gateCall = launcherSource.indexOf(
-      'await enforceSharedGovernanceIntegrityGate(options.companyRoot, config);',
+      "await enforceSharedGovernanceIntegrityGate(options.companyRoot, config, 'CompanyRunner');",
+    );
+    const readinessGateCall = launcherSource.indexOf(
+      "await enforceSharedGovernanceIntegrityGate(options.companyRoot, config, 'CompanyRunnerReadiness');",
     );
     const authorizationRead = launcherSource.indexOf(
       'const authorization = await readJson(options.authorizationPath);',
     );
     expect(gateCall).toBeGreaterThan(0);
     expect(gateCall).toBeLessThan(authorizationRead);
+    expect(readinessGateCall).toBeGreaterThan(0);
   });
 });
 

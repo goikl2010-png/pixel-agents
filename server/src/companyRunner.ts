@@ -53,6 +53,8 @@ export function evaluateGovernanceAction(
 }
 export type RunnerOutcome =
   | 'DISPATCHED'
+  | 'AGENT_BLOCKED'
+  | 'AGENT_FAILED'
   | 'DRY_RUN'
   | 'NO_ACTION_UNCHANGED'
   | 'NO_ACTION_TERMINAL'
@@ -356,8 +358,11 @@ export interface DispatchResult {
   inputTokens: number | 'unknown';
   outputTokens: number | 'unknown';
   launched: boolean;
+  agentOutcome?: AgentFinalOutcome;
   output?: string;
 }
+
+export type AgentFinalOutcome = 'completed' | 'blocked' | 'failed';
 
 export interface AgentDispatcher {
   dispatch(packet: HandoffPacket, signal: AbortSignal): Promise<DispatchResult>;
@@ -498,8 +503,8 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       childEnvironment,
     );
     if (!result.output) throw new Error('Codex returned no JSONL output.');
-    validateCodexJsonlOutput(result.output);
-    return result;
+    const agentOutcome = validateCodexJsonlOutput(result.output);
+    return { ...result, agentOutcome };
   }
 }
 
@@ -807,7 +812,7 @@ export async function spawnGovernedProcess(
   });
 }
 
-function validateCodexJsonlOutput(output: string): void {
+function validateCodexJsonlOutput(output: string): AgentFinalOutcome {
   const lines = output.split(/\r?\n/).filter(Boolean);
   if (lines.length === 0) throw new Error('Codex returned empty JSONL output.');
   const records = lines.map((line) => {
@@ -867,6 +872,7 @@ function validateCodexJsonlOutput(output: string): void {
     !['completed', 'blocked', 'failed'].includes(String(final.outcome))
   )
     throw new Error('Codex final output failed the governed output schema.');
+  return final.outcome as AgentFinalOutcome;
 }
 
 function sha256(value: string): string {
@@ -2177,18 +2183,27 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
         owner: postTask.owner,
       });
     }
-    await append(
-      'dispatch_result',
-      dispatch.exitCode === 0 && !dispatch.timedOut ? postOutcome : 'FAILED',
-      {
-        exit_code: dispatch.exitCode,
-        timed_out: dispatch.timedOut,
-        model: dispatch.model,
-        input_tokens: dispatch.inputTokens,
-        output_tokens: dispatch.outputTokens,
-      },
-    );
-    return { run_id: runId, outcome: 'DISPATCHED', decision, dispatch };
+    const publicOutcome: RunnerOutcome =
+      dispatch.agentOutcome === 'blocked'
+        ? 'AGENT_BLOCKED'
+        : dispatch.agentOutcome === 'failed'
+          ? 'AGENT_FAILED'
+          : 'DISPATCHED';
+    const persistedOutcome =
+      dispatch.exitCode !== 0 || dispatch.timedOut
+        ? 'FAILED'
+        : publicOutcome === 'DISPATCHED'
+          ? postOutcome
+          : publicOutcome;
+    await append('dispatch_result', persistedOutcome, {
+      exit_code: dispatch.exitCode,
+      timed_out: dispatch.timedOut,
+      model: dispatch.model,
+      input_tokens: dispatch.inputTokens,
+      output_tokens: dispatch.outputTokens,
+      ...(dispatch.agentOutcome ? { agent_outcome: dispatch.agentOutcome } : {}),
+    });
+    return { run_id: runId, outcome: publicOutcome, decision, dispatch };
   } catch (error) {
     await append('failure', 'FAILED', {
       blocker: error instanceof Error ? error.message : 'unknown runner failure',

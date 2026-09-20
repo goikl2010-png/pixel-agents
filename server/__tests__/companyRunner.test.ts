@@ -1195,6 +1195,53 @@ it.each([
   ).rejects.toThrow(/JSONL|output schema/);
 });
 
+it.each(['blocked', 'failed'] as const)(
+  'preserves the validated %s Codex outcome without exposing raw output semantics',
+  async (outcome) => {
+    const dispatcher = new CodexAgentDispatcher({
+      executable: 'codex',
+      allowedExecutable: 'codex',
+      outputSchemaPath: codexOutputSchemaPath,
+      workingRoot: path.resolve('.'),
+      approvedWorkingRoot: path.resolve('..'),
+      timeoutMs: 10,
+      credentialEnvironmentVariable: 'GH_TOKEN',
+      parentEnvironment: { GH_TOKEN: 'fake' },
+      versionProbe: async () => 'codex-cli 0.148.0',
+      globalCapabilityProbe: async () =>
+        '-a, --ask-for-approval <APPROVAL_POLICY>\n- on-request: Ask when the model requests approval',
+      capabilityProbe: async () =>
+        '--json --output-schema <FILE> --cd <DIR> --sandbox <SANDBOX_MODE>',
+      spawnProcess: async () => ({
+        exitCode: 0,
+        timedOut: false,
+        model: 'fake',
+        inputTokens: 0,
+        outputTokens: 0,
+        launched: true,
+        output: `${JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: JSON.stringify({ outcome }) },
+        })}\n`,
+      }),
+    });
+    await expect(
+      dispatcher.dispatch(
+        {
+          schema_version: '1',
+          task: { id: 'TASK-016', path: 'x', fingerprint: 'x' },
+          role: 'Nova',
+          state: 'DEVELOPMENT',
+          dispatch_id: 'x',
+          evidence: [],
+          instruction: 'x',
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ agentOutcome: outcome });
+  },
+);
+
 it('accepts a transition only with unique preceding role-owned current-head evidence', async () => {
   const { root, task, stateDir } = await fixture();
   const dispatcher = new FakeAgentDispatcher();
@@ -1514,6 +1561,78 @@ it('records authorized recovery and circuit acknowledgement before a fresh-attem
   expect(events.filter((event) => event.type === 'recovery_resolution')).toHaveLength(1);
   expect(events.filter((event) => event.type === 'circuit_acknowledgement')).toHaveLength(1);
   expect(events.filter((event) => event.type === 'readiness')).toHaveLength(1);
+});
+
+it('persists governed agent failure outcomes and resumes only under fresh readiness', async () => {
+  const { root, stateDir } = await fixture();
+  const target = 'a'.repeat(64);
+  const runner = 'b'.repeat(40);
+  const configuration = 'c'.repeat(64);
+  const readiness = async (attempt: number) =>
+    prepareRunnerReadiness({
+      stateDirectory: stateDir,
+      taskId: 'TASK-016',
+      expectedTargetSha256: target,
+      expectedRunnerCommit: runner,
+      expectedConfigurationSha256: configuration,
+      authorization: {
+        schema_version: '1',
+        authorization: 'RED',
+        authorized_by: 'Goi',
+        task_id: 'TASK-016',
+        attempt_id: `TASK-016-attempt-${String(attempt).padStart(3, '0')}`,
+        target_sha256: target,
+        runner_commit: runner,
+        configuration_sha256: configuration,
+        recovery: {
+          attempt: 11,
+          dispatch_id: `sha256:${'d'.repeat(64)}`,
+          launch_event_hashes: [],
+          evidence_path: path.join(root, 'unused-evidence.json'),
+          evidence_sha256: 'e'.repeat(64),
+        },
+        circuit: { failure_event_hashes: [] },
+      },
+    });
+  const run = (attempt: number, agentOutcome: 'completed' | 'blocked' | 'failed') =>
+    runCompanyOnce({
+      companyRoot: root,
+      taskId: 'TASK-016',
+      stateDirectory: stateDir,
+      dispatcher: new FakeAgentDispatcher({
+        exitCode: 0,
+        timedOut: false,
+        model: 'fake',
+        inputTokens: 0,
+        outputTokens: 0,
+        launched: true,
+        agentOutcome,
+      }),
+      githubResolver,
+      executionIdentity: `TASK-016-attempt-${String(attempt).padStart(3, '0')}`,
+      readinessTargetSha256: target,
+    });
+
+  await readiness(13);
+  await expect(run(13, 'blocked')).resolves.toMatchObject({ outcome: 'AGENT_BLOCKED' });
+  await expect(run(13, 'completed')).resolves.toMatchObject({ outcome: 'NO_ACTION_UNCHANGED' });
+  await readiness(14);
+  await expect(run(14, 'failed')).resolves.toMatchObject({ outcome: 'AGENT_FAILED' });
+  await readiness(15);
+  await expect(run(15, 'completed')).resolves.toMatchObject({ outcome: 'DISPATCHED' });
+
+  const events = await new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl')).read();
+  expect(events.filter((event) => event.type === 'readiness')).toHaveLength(3);
+  expect(
+    events
+      .filter((event) => event.type === 'dispatch_result')
+      .map((event) => [event.outcome, event.details.agent_outcome]),
+  ).toEqual([
+    ['AGENT_BLOCKED', 'blocked'],
+    ['AGENT_FAILED', 'failed'],
+    ['UNCHANGED', 'completed'],
+  ]);
+  await expect(readFile(path.join(stateDir, 'leases', 'TASK-016.lock'))).rejects.toThrow();
 });
 
 it('fails closed when heartbeat persistence is lost during dispatch', async () => {
