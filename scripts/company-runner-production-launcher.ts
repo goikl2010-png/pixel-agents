@@ -186,6 +186,7 @@ const GOVERNANCE_INTEGRITY_TIMEOUT_MS = 180_000;
 async function enforceSharedGovernanceIntegrityGate(
   companyRoot: string,
   config: ProductionRunnerConfig,
+  consumer: 'CompanyRunner' | 'CompanyRunnerReadiness',
 ): Promise<void> {
   const verifierPath = path.resolve(companyRoot, 'scripts', 'Test-GovernanceIntegrity.ps1');
   const manifestPath = path.resolve(companyRoot, 'config', 'governance-integrity.json');
@@ -211,7 +212,7 @@ async function enforceSharedGovernanceIntegrityGate(
         '-WorktreePath',
         runnerCheckoutRoot,
         '-Consumer',
-        'CompanyRunner',
+        consumer,
       ],
       {
         cwd: companyRoot,
@@ -578,7 +579,7 @@ export async function prepareProductionCompanyRunnerReadiness(
   )) as { activation_hold?: unknown };
   if (governance.activation_hold !== true)
     throw new Error('Production readiness is permitted only while activation_hold=true.');
-  await enforceSharedGovernanceIntegrityGate(options.companyRoot, config);
+  await enforceSharedGovernanceIntegrityGate(options.companyRoot, config, 'CompanyRunnerReadiness');
   const provenance = await (options.checkoutProbe ?? probeRunnerCheckout)(runnerCheckoutRoot);
   if (
     path.resolve(provenance.root) !== runnerCheckoutRoot ||
@@ -629,7 +630,7 @@ export async function launchProductionCompanyRunner(
   options: ProductionLaunchOptions,
 ): Promise<SanitizedProductionLaunchResult> {
   const config = validateProductionRunnerConfig(await readJson(options.configPath));
-  await enforceSharedGovernanceIntegrityGate(options.companyRoot, config);
+  await enforceSharedGovernanceIntegrityGate(options.companyRoot, config, 'CompanyRunner');
   const authorization = await readJson(options.authorizationPath);
   assertAuthorization(authorization);
   assertExactAuthorization(config, authorization);
