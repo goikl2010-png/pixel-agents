@@ -1615,11 +1615,29 @@ it('persists governed agent failure outcomes and resumes only under fresh readin
 
   await readiness(13);
   await expect(run(13, 'blocked')).resolves.toMatchObject({ outcome: 'AGENT_BLOCKED' });
+  await expect(runnerStatus(root, 'TASK-016', stateDir)).resolves.toMatchObject({
+    last_dispatch_outcome: 'AGENT_BLOCKED',
+    agent_outcome: 'blocked',
+    last_successful_action: null,
+    blocker: { outcome: 'AGENT_BLOCKED', details: { agent_outcome: 'blocked' } },
+  });
   await expect(run(13, 'completed')).resolves.toMatchObject({ outcome: 'NO_ACTION_UNCHANGED' });
   await readiness(14);
   await expect(run(14, 'failed')).resolves.toMatchObject({ outcome: 'AGENT_FAILED' });
+  await expect(runnerStatus(root, 'TASK-016', stateDir)).resolves.toMatchObject({
+    last_dispatch_outcome: 'AGENT_FAILED',
+    agent_outcome: 'failed',
+    last_successful_action: null,
+    blocker: { outcome: 'AGENT_FAILED', details: { agent_outcome: 'failed' } },
+  });
   await readiness(15);
   await expect(run(15, 'completed')).resolves.toMatchObject({ outcome: 'DISPATCHED' });
+  await expect(runnerStatus(root, 'TASK-016', stateDir)).resolves.toMatchObject({
+    last_dispatch_outcome: 'UNCHANGED',
+    agent_outcome: 'completed',
+    last_successful_action: 'dispatch_result',
+    blocker: null,
+  });
 
   const events = await new RunnerLedger(path.join(stateDir, 'TASK-016.jsonl')).read();
   expect(events.filter((event) => event.type === 'readiness')).toHaveLength(3);

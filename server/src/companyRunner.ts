@@ -2289,12 +2289,19 @@ export async function runnerStatus(
     .reverse()
     .find(
       (event) =>
-        ['observed_transition', 'dispatch_result'].includes(event.type) &&
-        event.outcome !== 'FAILED',
+        event.type === 'observed_transition' ||
+        (event.type === 'dispatch_result' &&
+          !['FAILED', 'AGENT_BLOCKED', 'AGENT_FAILED'].includes(event.outcome)),
     );
-  const lastBlocker = [...events]
-    .reverse()
-    .find((event) => ['failure', 'recovery', 'circuit_break'].includes(event.type));
+  const lastAgentBlocker =
+    lastDispatch && ['AGENT_BLOCKED', 'AGENT_FAILED'].includes(lastDispatch.outcome)
+      ? lastDispatch
+      : undefined;
+  const lastBlocker =
+    lastAgentBlocker ??
+    [...events]
+      .reverse()
+      .find((event) => ['failure', 'recovery', 'circuit_break'].includes(event.type));
   const approval = [...events].reverse().find((event) => event.type === 'approval_request');
   const leaseFile = path.join(stateDirectory, 'leases', `${taskId}.lock`);
   let lease: Lease | null = null;
@@ -2306,6 +2313,8 @@ export async function runnerStatus(
     owner: task.owner,
     last_action: last?.type ?? null,
     last_outcome: last?.outcome ?? null,
+    last_dispatch_outcome: lastDispatch?.outcome ?? null,
+    agent_outcome: lastDispatch?.details.agent_outcome ?? null,
     last_transition: lastTransition?.details ?? null,
     last_successful_action: lastSuccess?.type ?? null,
     pending_approval: approval
