@@ -229,15 +229,16 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   return Object.keys(value).sort().join('\n') === [...expected].sort().join('\n');
 }
 
-function isNormalizedUniqueNonEmptyStrings(value: unknown): value is string[] {
+function isNormalizedNonEmptyStrings(value: unknown): value is string[] {
   return (
     Array.isArray(value) &&
     value.length > 0 &&
-    value.every(
-      (entry) => typeof entry === 'string' && entry.length > 0 && entry === entry.trim(),
-    ) &&
-    new Set(value).size === value.length
+    value.every((entry) => typeof entry === 'string' && entry.length > 0 && entry === entry.trim())
   );
+}
+
+function isNormalizedUniqueNonEmptyStrings(value: unknown): value is string[] {
+  return isNormalizedNonEmptyStrings(value) && new Set(value).size === value.length;
 }
 
 function containsCredentialContent(value: unknown): boolean {
@@ -309,7 +310,7 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
     !SHA256.test(auth.target_sha256 ?? '') ||
     !SHA256.test(auth.configuration_sha256 ?? '') ||
     !GIT_SHA.test(auth.runner_commit ?? '') ||
-    !isNormalizedUniqueNonEmptyStrings(auth.argument_template) ||
+    !isNormalizedNonEmptyStrings(auth.argument_template) ||
     !isNormalizedUniqueNonEmptyStrings(auth.expected_effects) ||
     !isNormalizedUniqueNonEmptyStrings(auth.stop_conditions) ||
     typeof auth.rollback !== 'string' ||
