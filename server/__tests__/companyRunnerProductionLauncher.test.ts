@@ -817,6 +817,7 @@ describe('production Company Runner launcher', () => {
 
   it('rejects repeated option tokens when the authorization does not exactly match the package', async () => {
     const candidate = await fixture();
+    await useCanonicalWindowsPathsForSharedGate(candidate);
     await rewriteAuthorization(candidate, {
       ...candidate.authorization,
       argument_template: [
