@@ -383,19 +383,10 @@ function seams(candidate: Fixture, counters: { github: number; spawn: number }) 
             },
           };
     },
-    spawnProcess: async (_executable, args, cwd, timeout, _signal, environment) => {
+    spawnProcess: async (_executable, args, _cwd, timeout, _signal, environment) => {
       counters.spawn++;
       expect(args).toEqual([
-        '--ask-for-approval',
-        'on-request',
-        'exec',
-        '--json',
-        '--sandbox',
-        'workspace-write',
-        '--cd',
-        cwd,
-        '--output-schema',
-        path.join(cwd, 'docs/schemas/company-runner-codex-output-v1.schema.json'),
+        ...(candidate.config.argument_template as string[]).slice(0, -1),
         expect.any(String),
       ]);
       expect(timeout).toBe(120_000);
@@ -731,6 +722,119 @@ describe('production Company Runner launcher', () => {
     expect(source).not.toContain('FakeAgentDispatcher');
   });
 
+  it('accepts repeated option tokens when the ordered argument template exactly matches the package', async () => {
+    const candidate = await fixture();
+    const root = 'C:\\AI-Company';
+    const outputSchema = `${root}\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-codex-output-v1.schema.json`;
+    const argumentTemplate = [
+      '--ask-for-approval',
+      'on-request',
+      '-c',
+      'sandbox_workspace_write.network_access=true',
+      '-c',
+      'features.network_proxy.enabled=true',
+      '-c',
+      'features.network_proxy.domains={ "api.github.com" = "allow" }',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      root,
+      '--output-schema',
+      outputSchema,
+      '<JSON_HANDOFF_PACKET>',
+    ];
+    Object.assign(candidate.config, {
+      schema_version: '7',
+      task_id: 'TASK-037',
+      target_issue: 20,
+      target_pr: 21,
+      target_state: 'REVIEW',
+      target_owner: 'Atlas',
+      target_path: `${root}\\tasks\\review\\codex-pixel-agents-037.md`,
+      target_sha256: 'a'.repeat(64),
+      target_head: 'a408772e50051672bb27446280cb09cf9fb83bd7',
+      executable: `${root}\\codex.cmd`,
+      codex_version: 'codex-cli 0.154.0',
+      approved_working_root: root,
+      output_schema: outputSchema,
+      state_directory: `${root}\\.company-runner-state\\TASK-037`,
+      stop_file: `${root}\\.company-runner-state\\TASK-037\\STOP`,
+      argument_template: argumentTemplate,
+    });
+    Object.assign(candidate.authorization, {
+      schema_version: '7',
+      task_id: 'TASK-037',
+      attempt_id: 'TASK-037-attempt-015',
+      target_state: 'REVIEW',
+      target_owner: 'Atlas',
+      target_sha256: candidate.config.target_sha256,
+      runner_commit: candidate.config.runner_commit,
+      executable: candidate.config.executable,
+      codex_version: candidate.config.codex_version,
+      approved_working_root: candidate.config.approved_working_root,
+      output_schema: candidate.config.output_schema,
+      argument_template: argumentTemplate,
+      expected_effects: [...expectedEffectsForAuthorization('REVIEW', 'Atlas', 'TASK-037')],
+    });
+    Object.assign(candidate.authorization.github as Record<string, unknown>, {
+      issue: 20,
+      pr: 21,
+      branch: 'task/TASK-037-runner-v1-successor-activation-canary-005',
+      head: candidate.config.target_head,
+      scope: {
+        commits: 1,
+        additions: 8,
+        deletions: 0,
+        changedFiles: 1,
+        files: [
+          {
+            path: 'documentation/runner-v1-activation-canary-005.md',
+            status: 'added',
+            additions: 8,
+            deletions: 0,
+            changes: 8,
+          },
+        ],
+      },
+    });
+    candidate.authorization.configuration_sha256 = sha256(
+      `${JSON.stringify(candidate.config, null, 2)}\n`,
+    );
+    await Promise.all([
+      writeFile(candidate.configPath, `${JSON.stringify(candidate.config, null, 2)}\n`),
+      rewriteAuthorization(candidate, candidate.authorization),
+    ]);
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+
+    await expect(launchProductionCompanyRunner(options)).rejects.toThrow(
+      'Installed Codex version differs from the exact authorization.',
+    );
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+  });
+
+  it('rejects repeated option tokens when the authorization does not exactly match the package', async () => {
+    const candidate = await fixture();
+    await useCanonicalWindowsPathsForSharedGate(candidate);
+    await rewriteAuthorization(candidate, {
+      ...candidate.authorization,
+      argument_template: [
+        ...(candidate.authorization.argument_template as string[]).slice(0, 2),
+        '-c',
+        'features.network_proxy.enabled=true',
+        ...(candidate.authorization.argument_template as string[]).slice(2),
+      ],
+    });
+    const counters = { github: 0, spawn: 0 };
+
+    await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow(
+      'Production authorization argument template drifted.',
+    );
+    expect(counters).toEqual({ github: 0, spawn: 0 });
+  });
+
   it.each([
     ['READY_FOR_QA', 'Pixel'],
     ['QA', 'Pixel'],
@@ -930,6 +1034,18 @@ describe('production Company Runner launcher', () => {
     [
       'credential-like content',
       (auth: Record<string, unknown>) => ({ ...auth, rollback: `token=${'x'.repeat(24)}` }),
+    ],
+    [
+      'empty argument entry',
+      (auth: Record<string, unknown>) => ({ ...auth, argument_template: [''] }),
+    ],
+    [
+      'empty argument template',
+      (auth: Record<string, unknown>) => ({ ...auth, argument_template: [] }),
+    ],
+    [
+      'non-trimmed argument entry',
+      (auth: Record<string, unknown>) => ({ ...auth, argument_template: [' exec '] }),
     ],
     ['empty effects', (auth: Record<string, unknown>) => ({ ...auth, expected_effects: [] })],
     ['malformed effects', (auth: Record<string, unknown>) => ({ ...auth, expected_effects: [''] })],
