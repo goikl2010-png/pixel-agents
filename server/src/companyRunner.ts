@@ -394,7 +394,7 @@ export interface CodexDispatcherOptions {
   outputSchemaPath: string;
   timeoutMs: number;
   credentialEnvironmentVariable: 'GH_TOKEN';
-  githubNetworkAccess?: boolean;
+  githubNetworkPolicy?: 'api-only' | 'governance';
   parentEnvironment?: NodeJS.ProcessEnv;
   versionProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
   globalCapabilityProbe?: (executable: string, environment: NodeJS.ProcessEnv) => Promise<string>;
@@ -463,19 +463,22 @@ export class CodexAgentDispatcher implements AgentDispatcher {
     const schema = JSON.parse(await fs.readFile(outputSchema, 'utf8')) as unknown;
     validateJsonSchemaDefinition(schema);
     const prompt = JSON.stringify(packet);
+    const networkArguments = this.options.githubNetworkPolicy
+      ? [
+          '-c',
+          'sandbox_workspace_write.network_access=true',
+          '-c',
+          'features.network_proxy.enabled=true',
+          '-c',
+          this.options.githubNetworkPolicy === 'governance'
+            ? 'features.network_proxy.domains={ "api.github.com" = "allow", "github.com" = "allow" }'
+            : 'features.network_proxy.domains={ "api.github.com" = "allow" }',
+        ]
+      : [];
     const args = [
       '--ask-for-approval',
       'on-request',
-      ...(this.options.githubNetworkAccess
-        ? [
-            '-c',
-            'sandbox_workspace_write.network_access=true',
-            '-c',
-            'features.network_proxy.enabled=true',
-            '-c',
-            'features.network_proxy.domains={ "api.github.com" = "allow" }',
-          ]
-        : []),
+      ...networkArguments,
       'exec',
       '--json',
       '--sandbox',
@@ -491,7 +494,7 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       args.includes('--approve-for-me') ||
       args[0] !== '--ask-for-approval' ||
       args[1] !== 'on-request' ||
-      args[this.options.githubNetworkAccess ? 8 : 2] !== 'exec'
+      args[this.options.githubNetworkPolicy ? 8 : 2] !== 'exec'
     )
       throw new Error('Codex invocation contains a forbidden permission or bypass argument.');
     const result = await (this.options.spawnProcess ?? spawnGovernedProcess)(
@@ -832,6 +835,7 @@ function validateCodexJsonlOutput(output: string): AgentFinalOutcome {
       return true;
     const payload = record.payload;
     return (
+      record.phase === 'final_answer' &&
       record.type === 'event_msg' &&
       payload !== null &&
       typeof payload === 'object' &&

@@ -855,7 +855,7 @@ it('grants the Atlas child only deterministic GitHub proxy domains without stdin
     timeoutMs: 10,
     credentialEnvironmentVariable: 'GH_TOKEN',
     parentEnvironment: { GH_TOKEN: 'fake' },
-    githubNetworkAccess: true,
+    githubNetworkPolicy: 'governance',
     versionProbe: async () => 'codex-cli 0.148.0',
     globalCapabilityProbe: async () =>
       '-a, --ask-for-approval <APPROVAL_POLICY>\n- on-request: Ask when the model requests approval',
@@ -895,7 +895,7 @@ it('grants the Atlas child only deterministic GitHub proxy domains without stdin
     '-c',
     'features.network_proxy.enabled=true',
     '-c',
-    'features.network_proxy.domains={ "api.github.com" = "allow" }',
+    'features.network_proxy.domains={ "api.github.com" = "allow", "github.com" = "allow" }',
     'exec',
     '--json',
     '--sandbox',
