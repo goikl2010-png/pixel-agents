@@ -14,6 +14,7 @@ import {
   validateCanary004ActivationConfig,
   validateCanary005ActivationConfig,
   validateCanary005ReadinessConfig,
+  validateCanary005SuccessorConfig,
   validateControlledActivationConfig,
   validateSuccessorActivationConfig,
   validateTask019PreflightConfig,
@@ -554,6 +555,36 @@ it('accepts only the exact schema-v6 TASK-037 Atlas package', () => {
     validateCanary005ReadinessConfig({
       ...readiness,
       argument_template: config.argument_template,
+    }),
+  ).toThrow('argument template');
+  const successor = validateCanary005SuccessorConfig({
+    ...readiness,
+    schema_version: '8',
+    argument_template: [
+      '--ask-for-approval',
+      'on-request',
+      '-c',
+      'sandbox_workspace_write.network_access=true',
+      '-c',
+      'features.network_proxy.enabled=true',
+      '-c',
+      'features.network_proxy.domains={ "api.github.com" = "allow", "github.com" = "allow" }',
+      'exec',
+      '--json',
+      '--sandbox',
+      'workspace-write',
+      '--cd',
+      root,
+      '--output-schema',
+      schema,
+      '<JSON_HANDOFF_PACKET>',
+    ],
+  });
+  expect(successor).toMatchObject({ schema_version: '8', active: false });
+  expect(() =>
+    validateCanary005SuccessorConfig({
+      ...successor,
+      argument_template: readiness.argument_template,
     }),
   ).toThrow('argument template');
   for (const candidate of [

@@ -1,7 +1,7 @@
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { existsSync } from 'fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'fs/promises';
 import { hostname, tmpdir } from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -108,7 +108,7 @@ function sha256(value: string): string {
 }
 
 async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
-  const root = await mkdtemp(path.join(tmpdir(), 'task-022-launcher-'));
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'task-022-launcher-')));
   temporaryDirectories.push(root);
   await Promise.all(
     ['backlog', 'active', 'review', 'completed'].map((store) =>
@@ -1236,6 +1236,67 @@ describe('production Company Runner launcher', () => {
     await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
       outcome: 'DISPATCHED',
     });
+  });
+
+  it('accepts the Attempt-017 stream with commentary before one terminal outcome', async () => {
+    const candidate = await fixture();
+    const counters = { github: 0, spawn: 0 };
+    const options = seams(candidate, counters);
+    if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
+    options.spawnProcess = async () => {
+      counters.spawn++;
+      return {
+        exitCode: 0,
+        timedOut: false,
+        model: 'fake-process-seam',
+        inputTokens: 0,
+        outputTokens: 0,
+        launched: true,
+        output: [
+          {
+            type: 'event_msg',
+            payload: {
+              type: 'item_completed',
+              item: {
+                type: 'AgentMessage',
+                content: [{ type: 'Text', text: 'Inspecting the governed checkpoint.' }],
+              },
+            },
+            phase: 'commentary',
+          },
+          {
+            type: 'event_msg',
+            payload: {
+              type: 'item_completed',
+              item: {
+                type: 'AgentMessage',
+                content: [{ type: 'Text', text: 'Governance admission passed.' }],
+              },
+            },
+            phase: 'commentary',
+          },
+          {
+            type: 'event_msg',
+            payload: {
+              type: 'item_completed',
+              item: {
+                type: 'AgentMessage',
+                content: [{ type: 'Text', text: JSON.stringify({ outcome: 'completed' }) }],
+              },
+            },
+            phase: 'final_answer',
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n'),
+      };
+    };
+
+    await expect(launchProductionCompanyRunner(options)).resolves.toMatchObject({
+      outcome: 'DISPATCHED',
+    });
+    expect(governanceGateProcess.calls).toHaveLength(1);
+    expect(counters.spawn).toBe(1);
   });
 
   it.each([
