@@ -1,7 +1,7 @@
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { existsSync } from 'fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'fs/promises';
 import { hostname, tmpdir } from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -108,7 +108,7 @@ function sha256(value: string): string {
 }
 
 async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
-  const root = await mkdtemp(path.join(tmpdir(), 'task-022-launcher-'));
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'task-022-launcher-')));
   temporaryDirectories.push(root);
   await Promise.all(
     ['backlog', 'active', 'review', 'completed'].map((store) =>
