@@ -12,6 +12,7 @@ import {
 import { readConfig } from '../src/configPersistence.js';
 import { FileStateAdapter } from '../src/fileStateAdapter.js';
 import type { AgentState } from '../src/types.js';
+import { isolateTestHome } from './helpers/testHome.js';
 
 function createTestAgent(overrides: Partial<AgentState> = {}): AgentState {
   return {
@@ -45,12 +46,12 @@ function createTestAgent(overrides: Partial<AgentState> = {}): AgentState {
 /**
  * These tests exercise the area-related dispatch branches and the load-order
  * invariant in handleWebviewReady. They isolate the on-disk config + state
- * files by redirecting $HOME to a fresh temp dir for every test, so the
+ * files by redirecting the portable home environment to a fresh temp dir for every test, so the
  * standalone adapter writes its config.json there.
  */
 describe('clientMessageHandler: areas + carpet wire ordering', () => {
   let tempHome: string;
-  let originalHome: string | undefined;
+  let restoreTestHome: () => void;
   let store: AgentStateStore;
   let sent: Array<Record<string, unknown>>;
   let ctx: ClientMessageContext;
@@ -61,8 +62,7 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-test-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    restoreTestHome = isolateTestHome(tempHome);
 
     store = new AgentStateStore();
     store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
@@ -71,13 +71,12 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
+    try {
+      store.dispose();
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    } finally {
+      restoreTestHome();
     }
-    store.dispose();
-    fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
   // ── saveAreaMappings ─────────────────────────────────────────
@@ -272,7 +271,7 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
 
 describe('clientMessageHandler: saveAgentSeats palette sync', () => {
   let tempHome: string;
-  let originalHome: string | undefined;
+  let restoreTestHome: () => void;
   let store: AgentStateStore;
   let sent: Array<Record<string, unknown>>;
   let ctx: ClientMessageContext;
@@ -283,8 +282,7 @@ describe('clientMessageHandler: saveAgentSeats palette sync', () => {
 
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-seats-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    restoreTestHome = isolateTestHome(tempHome);
 
     store = new AgentStateStore();
     store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
@@ -293,13 +291,12 @@ describe('clientMessageHandler: saveAgentSeats palette sync', () => {
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
+    try {
+      store.dispose();
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    } finally {
+      restoreTestHome();
     }
-    store.dispose();
-    fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
   it('syncs in-range palette/hueShift onto the matching AgentState', () => {
