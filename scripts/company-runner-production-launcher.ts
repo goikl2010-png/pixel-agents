@@ -320,7 +320,7 @@ function assertAuthorization(value: unknown): asserts value is GoiRedLaunchAutho
     auth.rollback !== auth.rollback.trim() ||
     !Number.isInteger(auth.timeout_ms) ||
     (auth.timeout_ms ?? 0) < 1 ||
-    (auth.timeout_ms ?? 0) > 120_000 ||
+    (auth.timeout_ms ?? 0) > 180_000 ||
     ((auth.schema_version === '7' || auth.schema_version === '8') &&
       (typeof auth.attempt_id !== 'string' ||
         !new RegExp(`^${auth.task_id}-attempt-[0-9]{3}$`).test(auth.attempt_id)))

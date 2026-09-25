@@ -57,7 +57,7 @@ export interface ControlledActivationConfig {
   output_schema: string;
   state_directory: string;
   stop_file: string;
-  timeout_ms: 120000;
+  timeout_ms: 180000;
   lease_ttl_ms: 30000;
   heartbeat_ms: 10000;
   circuit_failure_threshold: 3;
@@ -91,7 +91,7 @@ export interface SuccessorActivationConfig {
   output_schema: string;
   state_directory: string;
   stop_file: string;
-  timeout_ms: 120000;
+  timeout_ms: 180000;
   lease_ttl_ms: 30000;
   heartbeat_ms: 10000;
   circuit_failure_threshold: 3;
@@ -125,7 +125,7 @@ export interface Canary003ActivationConfig {
   output_schema: string;
   state_directory: string;
   stop_file: string;
-  timeout_ms: 120000;
+  timeout_ms: 180000;
   lease_ttl_ms: 30000;
   heartbeat_ms: 10000;
   circuit_failure_threshold: 3;
@@ -159,7 +159,7 @@ export interface Canary004ActivationConfig {
   output_schema: string;
   state_directory: string;
   stop_file: string;
-  timeout_ms: 120000;
+  timeout_ms: 180000;
   lease_ttl_ms: 30000;
   heartbeat_ms: 10000;
   circuit_failure_threshold: 3;
@@ -193,7 +193,7 @@ export interface Canary005ActivationConfig {
   output_schema: string;
   state_directory: string;
   stop_file: string;
-  timeout_ms: 120000;
+  timeout_ms: 180000;
   lease_ttl_ms: 30000;
   heartbeat_ms: 10000;
   circuit_failure_threshold: 3;
@@ -324,7 +324,7 @@ function assertCommonConfiguration(config: Record<string, unknown>, label: strin
   if (
     !Number.isInteger(config.timeout_ms) ||
     (config.timeout_ms as number) < 1 ||
-    (config.timeout_ms as number) > 120_000 ||
+    (config.timeout_ms as number) > 180_000 ||
     !Number.isInteger(config.lease_ttl_ms) ||
     (config.lease_ttl_ms as number) < 1_000 ||
     (config.lease_ttl_ms as number) > 30_000 ||
@@ -367,7 +367,7 @@ export function validateControlledActivationConfig(value: unknown): ControlledAc
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
     config.codex_version !== 'codex-cli 0.152.1' ||
-    config.timeout_ms !== 120_000 ||
+    config.timeout_ms !== 180_000 ||
     config.lease_ttl_ms !== 30_000 ||
     config.heartbeat_ms !== 10_000 ||
     config.workflow_mutation_adapter !== false ||
@@ -400,7 +400,7 @@ export function validateSuccessorActivationConfig(value: unknown): SuccessorActi
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
     config.codex_version !== 'codex-cli 0.152.1' ||
-    config.timeout_ms !== 120_000 ||
+    config.timeout_ms !== 180_000 ||
     config.lease_ttl_ms !== 30_000 ||
     config.heartbeat_ms !== 10_000 ||
     config.workflow_mutation_adapter !== false ||
@@ -433,7 +433,7 @@ export function validateCanary003ActivationConfig(value: unknown): Canary003Acti
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
     config.codex_version !== 'codex-cli 0.153.4' ||
-    config.timeout_ms !== 120_000 ||
+    config.timeout_ms !== 180_000 ||
     config.lease_ttl_ms !== 30_000 ||
     config.heartbeat_ms !== 10_000 ||
     config.workflow_mutation_adapter !== false ||
@@ -466,7 +466,7 @@ export function validateCanary004ActivationConfig(value: unknown): Canary004Acti
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
     config.codex_version !== 'codex-cli 0.154.0' ||
-    config.timeout_ms !== 120_000 ||
+    config.timeout_ms !== 180_000 ||
     config.lease_ttl_ms !== 30_000 ||
     config.heartbeat_ms !== 10_000 ||
     config.workflow_mutation_adapter !== false ||
@@ -499,7 +499,7 @@ export function validateCanary005ActivationConfig(value: unknown): Canary005Acti
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
     config.codex_version !== 'codex-cli 0.154.0' ||
-    config.timeout_ms !== 120_000 ||
+    config.timeout_ms !== 180_000 ||
     config.lease_ttl_ms !== 30_000 ||
     config.heartbeat_ms !== 10_000 ||
     config.workflow_mutation_adapter !== false ||
@@ -532,7 +532,7 @@ export function validateCanary005ReadinessConfig(value: unknown): Canary005Readi
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
     config.codex_version !== 'codex-cli 0.154.0' ||
-    config.timeout_ms !== 120_000 ||
+    config.timeout_ms !== 180_000 ||
     config.lease_ttl_ms !== 30_000 ||
     config.heartbeat_ms !== 10_000 ||
     config.workflow_mutation_adapter !== false ||
@@ -565,7 +565,7 @@ export function validateCanary005SuccessorConfig(value: unknown): Canary005Succe
     config.dispatcher !== 'codex' ||
     config.approval_policy !== 'on-request' ||
     config.codex_version !== 'codex-cli 0.154.0' ||
-    config.timeout_ms !== 120_000 ||
+    config.timeout_ms !== 180_000 ||
     config.lease_ttl_ms !== 30_000 ||
     config.heartbeat_ms !== 10_000 ||
     config.workflow_mutation_adapter !== false ||
@@ -696,7 +696,7 @@ export function validateTask019PreflightConfig(value: unknown): Task019Preflight
     typeof config.timeout_ms !== 'number' ||
     !Number.isInteger(config.timeout_ms) ||
     config.timeout_ms < 1 ||
-    config.timeout_ms > 120_000 ||
+    config.timeout_ms > 180_000 ||
     typeof config.lease_ttl_ms !== 'number' ||
     !Number.isInteger(config.lease_ttl_ms) ||
     config.lease_ttl_ms < 1_000 ||
