@@ -67,7 +67,7 @@ it.each([
   ['approval_policy', 'never'],
   ['codex_version', 'codex-cli 0.149.0'],
   ['workflow_mutation_adapter', true],
-  ['timeout_ms', 120_001],
+  ['timeout_ms', 180_001],
 ] as const)('fails closed when %s drifts from the exact pilot', async (field, value) => {
   await expect(async () =>
     validateTask019PreflightConfig({ ...(await readConfig()), [field]: value }),
@@ -189,7 +189,7 @@ it('accepts one exact schema-v2 non-TASK-020 canary and pins current Codex', asy
     output_schema: schema,
     state_directory: `${root}\\.company-runner-state\\TASK-028`,
     stop_file: `${root}\\.company-runner-state\\TASK-028\\STOP`,
-    timeout_ms: 120000,
+    timeout_ms: 180000,
     lease_ttl_ms: 30000,
     heartbeat_ms: 10000,
     circuit_failure_threshold: 3,
@@ -257,7 +257,7 @@ it('accepts only the exact schema-v3 TASK-032 successor package', () => {
     output_schema: schema,
     state_directory: `${root}\\.company-runner-state\\TASK-032`,
     stop_file: `${root}\\.company-runner-state\\TASK-032\\STOP`,
-    timeout_ms: 120000,
+    timeout_ms: 180000,
     lease_ttl_ms: 30000,
     heartbeat_ms: 10000,
     circuit_failure_threshold: 3,
@@ -334,7 +334,7 @@ it('accepts only the exact schema-v4 TASK-033 canary package', () => {
     output_schema: schema,
     state_directory: `${root}\\.company-runner-state\\TASK-033`,
     stop_file: `${root}\\.company-runner-state\\TASK-033\\STOP`,
-    timeout_ms: 120000,
+    timeout_ms: 180000,
     lease_ttl_ms: 30000,
     heartbeat_ms: 10000,
     circuit_failure_threshold: 3,
@@ -381,7 +381,7 @@ it('accepts only the exact schema-v4 TASK-033 canary package', () => {
     { ...config, codex_version: 'codex-cli 0.152.1' },
     { ...config, active: true },
     { ...config, max_dispatches: 2 },
-    { ...config, timeout_ms: 120001 },
+    { ...config, timeout_ms: 180001 },
     { ...config, workflow_mutation_adapter: true },
   ])
     expect(() => validateCanary003ActivationConfig(candidate)).toThrow();
@@ -413,7 +413,7 @@ it('accepts only the exact schema-v5 TASK-035 canary package', () => {
     output_schema: schema,
     state_directory: `${root}\\.company-runner-state\\TASK-035`,
     stop_file: `${root}\\.company-runner-state\\TASK-035\\STOP`,
-    timeout_ms: 120000,
+    timeout_ms: 180000,
     lease_ttl_ms: 30000,
     heartbeat_ms: 10000,
     circuit_failure_threshold: 3,
@@ -460,7 +460,7 @@ it('accepts only the exact schema-v5 TASK-035 canary package', () => {
     { ...config, codex_version: 'codex-cli 0.153.4' },
     { ...config, active: true },
     { ...config, max_dispatches: 2 },
-    { ...config, timeout_ms: 120001 },
+    { ...config, timeout_ms: 180001 },
     { ...config, workflow_mutation_adapter: true },
   ])
     expect(() => validateCanary004ActivationConfig(candidate)).toThrow();
@@ -492,7 +492,7 @@ it('accepts only the exact schema-v6 TASK-037 Atlas package', () => {
     output_schema: schema,
     state_directory: `${root}\\.company-runner-state\\TASK-037`,
     stop_file: `${root}\\.company-runner-state\\TASK-037\\STOP`,
-    timeout_ms: 120000,
+    timeout_ms: 180000,
     lease_ttl_ms: 30000,
     heartbeat_ms: 10000,
     circuit_failure_threshold: 3,
@@ -600,7 +600,7 @@ it('accepts only the exact schema-v6 TASK-037 Atlas package', () => {
     { ...config, runner_commit: 'C'.repeat(40) },
     { ...config, active: true },
     { ...config, max_dispatches: 2 },
-    { ...config, timeout_ms: 120001 },
+    { ...config, timeout_ms: 180001 },
     { ...config, workflow_mutation_adapter: true },
   ])
     expect(() => validateCanary005ActivationConfig(candidate)).toThrow();

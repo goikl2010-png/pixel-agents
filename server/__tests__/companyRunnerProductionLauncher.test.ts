@@ -201,6 +201,7 @@ ${inlineEvidence}
     output_schema: outputSchemaPath,
     state_directory: stateDirectory,
     stop_file: stopFile,
+    timeout_ms: 180_000,
     argument_template: [
       '--ask-for-approval',
       'on-request',
@@ -389,7 +390,7 @@ function seams(candidate: Fixture, counters: { github: number; spawn: number }) 
         ...(candidate.config.argument_template as string[]).slice(0, -1),
         expect.any(String),
       ]);
-      expect(timeout).toBe(120_000);
+      expect(timeout).toBe(180_000);
       expect(environment.GH_TOKEN).toBe(SENTINEL);
       expect(JSON.stringify(args)).not.toContain(SENTINEL);
       return {
@@ -704,8 +705,10 @@ describe('production Company Runner launcher', () => {
     expect(existsSync(candidate.stateDirectory)).toBe(false);
   });
 
-  it('constructs the real dispatcher and reaches exactly one governed fake process spawn', async () => {
+  it('accepts the exact 180-second bound and reaches one governed dispatcher/run-once spawn', async () => {
     const candidate = await fixture();
+    expect(candidate.config.timeout_ms).toBe(180_000);
+    expect(candidate.authorization.timeout_ms).toBe(180_000);
     const counters = { github: 0, spawn: 0 };
     const options = seams(candidate, counters);
     if (await stoppedByCanonicalWindowsPathGate(options, counters)) return;
@@ -720,6 +723,23 @@ describe('production Company Runner launcher', () => {
     );
     expect(source).not.toMatch(/dispatcher\??\s*:/);
     expect(source).not.toContain('FakeAgentDispatcher');
+  });
+
+  it('rejects a timeout above the 180-second bound before governed dispatch', async () => {
+    const candidate = await fixture();
+    Object.assign(candidate.config, { timeout_ms: 180_001 });
+    Object.assign(candidate.authorization, {
+      timeout_ms: 180_001,
+      configuration_sha256: sha256(`${JSON.stringify(candidate.config, null, 2)}\n`),
+    });
+    await Promise.all([
+      writeFile(candidate.configPath, `${JSON.stringify(candidate.config, null, 2)}\n`),
+      rewriteAuthorization(candidate, candidate.authorization),
+    ]);
+    const counters = { github: 0, spawn: 0 };
+
+    await expect(launchProductionCompanyRunner(seams(candidate, counters))).rejects.toThrow();
+    expect(counters).toEqual({ github: 0, spawn: 0 });
   });
 
   it('accepts repeated option tokens when the ordered argument template exactly matches the package', async () => {
