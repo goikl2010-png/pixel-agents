@@ -549,6 +549,58 @@ it('fails closed when the narrow role-workspace gate rejects after live Runner a
   expect(calls).toEqual([]);
 });
 
+it('launcher resumes a current-state checkpoint and carries it into the later role context', async () => {
+  const fixture = await lifecycleFixture();
+  const active = await launcherManifest(fixture, false);
+  const authorization = {
+    schema_version: '1' as const,
+    authorization: 'RED' as const,
+    authorized_by: 'Goi' as const,
+    task_id: 'TASK-051',
+    manifest_sha256: `sha256:${createHash('sha256').update(active.bytes).digest('hex')}`,
+  };
+  const calls: EmployeeIdentity[] = [];
+  const packets: Array<Parameters<AgentDispatcher['dispatch']>[0]> = [];
+  const delegate = lifecycleDispatcher(calls);
+  const dispatcher: AgentDispatcher = {
+    dispatch: async (packet, signal) => {
+      packets.push(packet);
+      return delegate.dispatch(packet, signal);
+    },
+  };
+  const launch = async () =>
+    launchCompanyRunnerV1({
+      manifestPath: active.path,
+      authorization,
+      governanceGate: async () => undefined,
+      dispatcher,
+      githubResolver,
+    });
+  const activeStore = path.join(fixture.company, 'tasks', 'active');
+  await rm(activeStore, { recursive: true, force: true });
+  await writeFile(activeStore, 'force a transition-only failure\n');
+
+  await expect(launch()).rejects.toThrow();
+  expect(calls).toEqual(['Alex']);
+  await rm(activeStore, { force: true });
+  await mkdir(activeStore, { recursive: true });
+
+  await expect(launch()).resolves.toMatchObject({ outcome: 'DISPATCHED' });
+  expect(calls).toEqual(['Alex']);
+  const eventsAfterResume = await new RunnerLedger(
+    path.join(fixture.stateDirectory, 'TASK-051.jsonl'),
+  ).read();
+  expect(eventsAfterResume.some((event) => event.type === 'checkpoint_resume')).toBe(true);
+
+  await expect(launch()).resolves.toMatchObject({
+    outcome: 'DISPATCHED',
+    decision: { owner: 'Nova' },
+  });
+  expect(calls).toEqual(['Alex', 'Nova']);
+  const novaContextIds = packets[1].context_manifest!.entries.map((entry) => entry.id);
+  expect(novaContextIds.some((id) => id.startsWith('checkpoint-'))).toBe(true);
+});
+
 it('runs the legal Alex -> Nova -> Pixel PASS -> Atlas APPROVED -> Alex -> COMPLETE path', async () => {
   const fixture = await lifecycleFixture();
   const calls: EmployeeIdentity[] = [];

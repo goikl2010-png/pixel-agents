@@ -258,6 +258,9 @@ export async function launchCompanyRunnerV1(
       parentEnvironment: options.parentEnvironment,
       includePullRequestScope: true,
     });
+  const checkpointStore = new SpecialistCheckpointStore(
+    path.join(manifest.state_directory, 'checkpoints'),
+  );
   return runCompanyOnce({
     companyRoot: manifest.company_root,
     taskId: manifest.task_id,
@@ -289,19 +292,26 @@ export async function launchCompanyRunnerV1(
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         }
+        const priorStateCheckpoints: Array<{ id: string; path: string }> = [];
+        for (const name of checkpointNames) {
+          const dispatchId = `sha256:${path.basename(name, '.json')}`;
+          const checkpoint = await checkpointStore.load(currentTask.id, dispatchId);
+          if (!checkpoint)
+            throw new Error('Enumerated specialist checkpoint disappeared during context loading.');
+          if (checkpoint.from_state !== currentTask.state)
+            priorStateCheckpoints.push({
+              id: `checkpoint-${path.basename(name, '.json')}`,
+              path: path.join(checkpointDirectory, name),
+            });
+        }
         return [
           { id: 'authoritative-task', path: currentTask.path },
           ...configured,
-          ...checkpointNames.map((name) => ({
-            id: `checkpoint-${path.basename(name, '.json')}`,
-            path: path.join(checkpointDirectory, name),
-          })),
+          ...priorStateCheckpoints,
         ];
       },
       publisher: new ManifestBoundGitPublisher(),
-      checkpointStore: new SpecialistCheckpointStore(
-        path.join(manifest.state_directory, 'checkpoints'),
-      ),
+      checkpointStore,
       transitionWriter: new MarkdownRunnerTransitionWriter(manifest.company_root),
       completionVerifier: async (completion, currentTask, signal) => {
         const facts = await githubResolver.resolve(currentTask, signal);
