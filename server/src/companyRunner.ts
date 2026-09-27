@@ -6,6 +6,18 @@ import * as path from 'path';
 
 import { EMPLOYEE_IDENTITIES, type EmployeeIdentity } from './actionableTaskDiscovery.js';
 import {
+  AGENT_RESULT_V1,
+  type AgentResultV1,
+  buildContextManifestV1,
+  type ContextManifestV1,
+  ManifestBoundGitPublisher,
+  MarkdownRunnerTransitionWriter,
+  resolveWorkspaceDescriptorV1,
+  SpecialistCheckpointStore,
+  validateAgentResultV1,
+  type WorkspaceDescriptorV1,
+} from './companyRunnerContract.js';
+import {
   LIFECYCLE_STATES,
   type LifecycleState,
   storageForLifecycleState,
@@ -105,6 +117,7 @@ export interface GitHubFacts {
   base: string;
   branch: string;
   head: string;
+  merge?: string;
   scope?: GitHubPullRequestScope;
 }
 
@@ -230,6 +243,7 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       state?: string;
       draft?: boolean;
       merged_at?: string | null;
+      merge_commit_sha?: string | null;
       commits?: number;
       additions?: number;
       deletions?: number;
@@ -243,7 +257,8 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       typeof prObject.draft !== 'boolean' ||
       !prObject.base?.ref ||
       !prObject.head?.ref ||
-      !/^[0-9a-f]{40}$/i.test(prObject.head.sha ?? '')
+      !/^[0-9a-f]{40}$/i.test(prObject.head.sha ?? '') ||
+      (prObject.merged_at && !/^[0-9a-f]{40}$/i.test(prObject.merge_commit_sha ?? ''))
     )
       throw new Error('GitHub returned malformed or incomplete action-required facts.');
     let scope: GitHubPullRequestScope | undefined;
@@ -314,6 +329,7 @@ export class GhCliGitHubFactResolver implements GitHubFactResolver {
       base: prObject.base.ref,
       branch: prObject.head.ref,
       head: prObject.head.sha!,
+      ...(prObject.merged_at ? { merge: prObject.merge_commit_sha! } : {}),
       ...(scope ? { scope } : {}),
     };
   }
@@ -349,6 +365,9 @@ export interface HandoffPacket {
   dispatch_id: string;
   evidence: string[];
   instruction: string;
+  contract?: typeof AGENT_RESULT_V1;
+  workspace?: WorkspaceDescriptorV1;
+  context_manifest?: ContextManifestV1;
 }
 
 export interface DispatchResult {
@@ -359,6 +378,7 @@ export interface DispatchResult {
   outputTokens: number | 'unknown';
   launched: boolean;
   agentOutcome?: AgentFinalOutcome;
+  agentResult?: AgentResultV1;
   output?: string;
 }
 
@@ -506,8 +526,10 @@ export class CodexAgentDispatcher implements AgentDispatcher {
       childEnvironment,
     );
     if (!result.output) throw new Error('Codex returned no JSONL output.');
-    const agentOutcome = validateCodexJsonlOutput(result.output);
-    return { ...result, agentOutcome };
+    const final = validateCodexJsonlOutput(result.output, packet);
+    return typeof final === 'string'
+      ? { ...result, agentOutcome: final }
+      : { ...result, agentOutcome: final.outcome, agentResult: final };
   }
 }
 
@@ -815,7 +837,10 @@ export async function spawnGovernedProcess(
   });
 }
 
-function validateCodexJsonlOutput(output: string): AgentFinalOutcome {
+function validateCodexJsonlOutput(
+  output: string,
+  packet?: HandoffPacket,
+): AgentFinalOutcome | AgentResultV1 {
   const lines = output.split(/\r?\n/).filter(Boolean);
   if (lines.length === 0) throw new Error('Codex returned empty JSONL output.');
   const records = lines.map((line) => {
@@ -870,6 +895,16 @@ function validateCodexJsonlOutput(output: string): AgentFinalOutcome {
     final = JSON.parse(String(text)) as Record<string, unknown>;
   } catch {
     throw new Error('Codex final output is malformed JSON.');
+  }
+  if (packet?.contract === AGENT_RESULT_V1) {
+    if (!packet.context_manifest)
+      throw new Error('AgentResultV1 dispatch lacks a context manifest.');
+    return validateAgentResultV1(final, {
+      taskId: packet.task.id,
+      role: packet.role,
+      state: packet.state,
+      contextManifestSha256: packet.context_manifest.manifest_sha256,
+    });
   }
   if (
     Object.keys(final).some((key) => key !== 'outcome') ||
@@ -1132,6 +1167,7 @@ export function decideRunnerAction(
   task: RunnerTask,
   facts?: ReconciledFacts,
   executionIdentity?: string,
+  allowOwnerAuthorizedAlexCompletion = false,
 ): RunnerDecision {
   const fingerprint = sha256(
     `${task.path.replace(/\\/g, '/')}\n${task.bytes}\n${canonicalFactBytes(facts)}`,
@@ -1155,6 +1191,11 @@ export function decideRunnerAction(
   if (task.state === 'COMPLETED') {
     action = 'STOP_TERMINAL';
     reason = 'COMPLETED is terminal.';
+  } else if (task.state === 'APPROVED' && allowOwnerAuthorizedAlexCompletion) {
+    action = 'DISPATCH_ROLE';
+    classification = 'RED';
+    reason =
+      'Dispatch Alex under exact owner authorization; Runner retains merge verification and the COMPLETED transition.';
   } else if (task.state === 'APPROVED' || task.state === 'BLOCKED') {
     action = 'AWAIT_ALEX_DECISION';
     classification = task.state === 'APPROVED' ? 'RED' : 'UNKNOWN';
@@ -1177,6 +1218,30 @@ export function decideRunnerAction(
     affected_resources: affectedResources,
     external_effects: externalEffects,
     ...(facts?.github ? { github: facts.github } : {}),
+  };
+}
+
+function bindProductionContractDecision(
+  decision: RunnerDecision,
+  workspace: WorkspaceDescriptorV1,
+  context: ContextManifestV1,
+  executionIdentity?: string,
+): RunnerDecision {
+  const stateFingerprint = sha256(
+    `${decision.state_fingerprint}\n${context.manifest_sha256}\n${JSON.stringify(workspace)}`,
+  );
+  const dispatchId = sha256(
+    `company-runner-v1-shared-contract\n${decision.task_id}\n${decision.state}\n${decision.owner}\n${decision.action_kind}\n${stateFingerprint}${executionIdentity ? `\n${executionIdentity}` : ''}`,
+  );
+  return {
+    ...decision,
+    state_fingerprint: stateFingerprint,
+    dispatch_id: dispatchId,
+    affected_resources: [
+      ...decision.affected_resources,
+      workspace.root,
+      ...context.entries.map((entry) => entry.path),
+    ],
   };
 }
 
@@ -1296,6 +1361,7 @@ const SCHEMA_KEYS = new Set([
   'pattern',
   'format',
   'minLength',
+  'maxLength',
   'minimum',
   'minItems',
   'uniqueItems',
@@ -1389,6 +1455,8 @@ function validateJsonSchemaValue(
   if (typeof value === 'string') {
     if (schema.minLength !== undefined && value.length < Number(schema.minLength))
       errors.push(`${at} is too short`);
+    if (schema.maxLength !== undefined && value.length > Number(schema.maxLength))
+      errors.push(`${at} is too long`);
     if (schema.pattern !== undefined && !new RegExp(String(schema.pattern)).test(value))
       errors.push(`${at} fails pattern`);
     if (schema.format === 'date-time' && Number.isNaN(Date.parse(value)))
@@ -1915,6 +1983,30 @@ export interface RunOnceOptions {
   approvalSchemaPath?: string;
   executionIdentity?: string;
   readinessTargetSha256?: string;
+  productionContract?: ProductionContractOptionsV1;
+}
+
+export interface ProductionContractOptionsV1 {
+  workspace:
+    | WorkspaceDescriptorV1
+    | ((
+        task: RunnerTask,
+        role: EmployeeIdentity,
+      ) => WorkspaceDescriptorV1 | Promise<WorkspaceDescriptorV1>);
+  contextRoots: string[];
+  contextSources: (
+    task: RunnerTask,
+    role: EmployeeIdentity,
+  ) => Array<{ id: string; path: string }> | Promise<Array<{ id: string; path: string }>>;
+  publisher?: Pick<ManifestBoundGitPublisher, 'publish' | 'verifyReceipt'>;
+  checkpointStore?: SpecialistCheckpointStore;
+  transitionWriter?: MarkdownRunnerTransitionWriter;
+  completionVerifier?: (
+    completion: NonNullable<AgentResultV1['completion']>,
+    task: RunnerTask,
+    signal: AbortSignal,
+  ) => Promise<void>;
+  ownerAuthorizedAlexCompletion?: boolean;
 }
 export interface RunOnceResult {
   run_id: string;
@@ -1990,7 +2082,12 @@ async function verifyObservedTransition(
 export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const runId = randomUUID();
   const task = await readRunnerTask(options.companyRoot, options.taskId);
-  let decision = decideRunnerAction(task, undefined, options.executionIdentity);
+  let decision = decideRunnerAction(
+    task,
+    undefined,
+    options.executionIdentity,
+    options.productionContract?.ownerAuthorizedAlexCompletion,
+  );
   const ledger = new RunnerLedger(path.join(options.stateDirectory, `${task.id}.jsonl`));
   if (options.executionIdentity)
     await assertRunnerReadiness(
@@ -2039,11 +2136,53 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       await append('decision', 'NO_ACTION_TERMINAL');
       return { run_id: runId, outcome: 'NO_ACTION_TERMINAL', decision };
     }
-    const facts = await reconcileRunnerFacts(options.companyRoot, task, options.githubResolver);
-    decision = decideRunnerAction(task, facts, options.executionIdentity);
+    const issueOnlyContractEntry =
+      options.productionContract &&
+      ['BACKLOG', 'DEVELOPMENT'].includes(task.state) &&
+      taskDeliveryFields(task).pr === undefined;
+    const facts: ReconciledFacts = issueOnlyContractEntry
+      ? { evidence: [], permissionProfile: 'managed-on-request' }
+      : await reconcileRunnerFacts(options.companyRoot, task, options.githubResolver);
+    decision = decideRunnerAction(
+      task,
+      facts,
+      options.executionIdentity,
+      options.productionContract?.ownerAuthorizedAlexCompletion,
+    );
+    let workspace: WorkspaceDescriptorV1 | undefined;
+    let contextManifest: ContextManifestV1 | undefined;
+    let checkpointStore: SpecialistCheckpointStore | undefined;
+    if (options.productionContract) {
+      const configuredWorkspace =
+        typeof options.productionContract.workspace === 'function'
+          ? await options.productionContract.workspace(task, task.owner)
+          : options.productionContract.workspace;
+      workspace = await resolveWorkspaceDescriptorV1(configuredWorkspace, {
+        taskId: task.id,
+        role: task.owner,
+      });
+      contextManifest = await buildContextManifestV1({
+        taskId: task.id,
+        role: task.owner,
+        roots: options.productionContract.contextRoots,
+        sources: await options.productionContract.contextSources(task, task.owner),
+      });
+      checkpointStore =
+        options.productionContract.checkpointStore ??
+        new SpecialistCheckpointStore(path.join(options.stateDirectory, 'checkpoints'));
+      decision = bindProductionContractDecision(
+        decision,
+        workspace,
+        contextManifest,
+        options.executionIdentity,
+      );
+    }
     await lease.bind(runId, decision);
     await append('lease_identity', 'BOUND');
     const previous = await ledger.read();
+    const existingCheckpoint = checkpointStore
+      ? await checkpointStore.load(task.id, decision.dispatch_id)
+      : null;
     const unresolvedIntent = previous.some(
       (event) =>
         event.dispatch_id === decision.dispatch_id &&
@@ -2053,11 +2192,12 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
             result.dispatch_id === decision.dispatch_id && result.type === 'dispatch_result',
         ),
     );
-    if (unresolvedIntent) {
+    if (unresolvedIntent && !existingCheckpoint) {
       await append('recovery', 'RECOVERY_REQUIRED', { blocker: 'ambiguous prior launch' });
       return { run_id: runId, outcome: 'RECOVERY_REQUIRED', decision };
     }
     if (
+      !existingCheckpoint &&
       previous.some(
         (event) => event.dispatch_id === decision.dispatch_id && event.type === 'dispatch_result',
       )
@@ -2071,17 +2211,31 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       return { run_id: runId, outcome: 'FAILED', decision };
     }
     const refreshedTask = await readRunnerTask(options.companyRoot, options.taskId);
-    const refreshedFacts = await reconcileRunnerFacts(
-      options.companyRoot,
+    const refreshedFacts = issueOnlyContractEntry
+      ? facts
+      : await reconcileRunnerFacts(options.companyRoot, refreshedTask, options.githubResolver);
+    let refreshed = decideRunnerAction(
       refreshedTask,
-      options.githubResolver,
+      refreshedFacts,
+      options.executionIdentity,
+      options.productionContract?.ownerAuthorizedAlexCompletion,
     );
-    const refreshed = decideRunnerAction(refreshedTask, refreshedFacts, options.executionIdentity);
+    if (workspace && contextManifest)
+      refreshed = bindProductionContractDecision(
+        refreshed,
+        workspace,
+        contextManifest,
+        options.executionIdentity,
+      );
     if (refreshed.dispatch_id !== decision.dispatch_id) {
       await append('failure', 'STALE_STATE');
       return { run_id: runId, outcome: 'FAILED', decision };
     }
-    if (decision.classification !== 'GREEN') {
+    const exactAlexAuthorization =
+      task.state === 'APPROVED' &&
+      task.owner === 'Alex' &&
+      options.productionContract?.ownerAuthorizedAlexCompletion === true;
+    if (decision.classification !== 'GREEN' && !exactAlexAuthorization) {
       const approval = approvalPackage(
         decision,
         runId,
@@ -2110,35 +2264,68 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
       await append('decision', 'DRY_RUN', { classification: decision.classification });
       return { run_id: runId, outcome: 'DRY_RUN', decision };
     }
-    await append('dispatch_intent', 'PERSISTED');
-    const controller = new AbortController();
-    const externalAbort = (): void => controller.abort();
-    options.signal?.addEventListener('abort', externalAbort, { once: true });
-    const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 120_000);
-    let heartbeatFailure: Error | undefined;
-    let heartbeatWork = Promise.resolve();
-    const heartbeat = setInterval(() => {
-      heartbeatWork = heartbeatWork.then(async () => {
-        try {
-          await lease.renew(runId);
-          await append('lease_heartbeat', 'RENEWED');
-        } catch (error) {
-          heartbeatFailure = error as Error;
-          controller.abort();
-        }
-      });
-    }, options.heartbeatMs ?? 10_000);
-    const stopMonitor = options.stopFile
-      ? setInterval(
-          () => {
-            void exists(options.stopFile!).then((stopped) => stopped && controller.abort());
-          },
-          Math.min(options.heartbeatMs ?? 10_000, 1_000),
-        )
-      : undefined;
-    await append('dispatch_start', 'STARTED');
     let dispatch: DispatchResult;
-    try {
+    let contractCheckpoint = existingCheckpoint;
+    if (existingCheckpoint) {
+      if (!workspace || !contextManifest || !options.productionContract)
+        throw new Error('A specialist checkpoint cannot resume outside the shared contract.');
+      const resumedResult = validateAgentResultV1(existingCheckpoint.result, {
+        taskId: task.id,
+        role: task.owner,
+        state: task.state,
+        contextManifestSha256: contextManifest.manifest_sha256,
+      });
+      if (
+        existingCheckpoint.role !== task.owner ||
+        existingCheckpoint.from_state !== task.state ||
+        existingCheckpoint.context_manifest_sha256 !== contextManifest.manifest_sha256
+      )
+        throw new Error('Specialist checkpoint drifted from the current dispatch contract.');
+      if (existingCheckpoint.publication) {
+        const publisher = options.productionContract.publisher ?? new ManifestBoundGitPublisher();
+        await publisher.verifyReceipt(workspace, existingCheckpoint.publication);
+      }
+      dispatch = {
+        exitCode: 0,
+        timedOut: false,
+        model: 'checkpoint',
+        inputTokens: 0,
+        outputTokens: 0,
+        launched: false,
+        agentOutcome: resumedResult.outcome,
+        agentResult: resumedResult,
+      };
+      await append('checkpoint_resume', 'VERIFIED', {
+        checkpoint_sha256: existingCheckpoint.checkpoint_sha256,
+      });
+    } else {
+      await append('dispatch_intent', 'PERSISTED');
+      const controller = new AbortController();
+      const externalAbort = (): void => controller.abort();
+      options.signal?.addEventListener('abort', externalAbort, { once: true });
+      const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 120_000);
+      let heartbeatFailure: Error | undefined;
+      let heartbeatWork = Promise.resolve();
+      const heartbeat = setInterval(() => {
+        heartbeatWork = heartbeatWork.then(async () => {
+          try {
+            await lease.renew(runId);
+            await append('lease_heartbeat', 'RENEWED');
+          } catch (error) {
+            heartbeatFailure = error as Error;
+            controller.abort();
+          }
+        });
+      }, options.heartbeatMs ?? 10_000);
+      const stopMonitor = options.stopFile
+        ? setInterval(
+            () => {
+              void exists(options.stopFile!).then((stopped) => stopped && controller.abort());
+            },
+            Math.min(options.heartbeatMs ?? 10_000, 1_000),
+          )
+        : undefined;
+      await append('dispatch_start', 'STARTED');
       const packet: HandoffPacket = {
         schema_version: RUNNER_SCHEMA_VERSION,
         task: { id: task.id, path: task.path, fingerprint: decision.state_fingerprint },
@@ -2146,46 +2333,136 @@ export async function runCompanyOnce(options: RunOnceOptions): Promise<RunOnceRe
         state: task.state,
         dispatch_id: decision.dispatch_id,
         evidence: facts.evidence.map((item) => item.path),
-        instruction:
-          'Load the authoritative task and execute only the exact next role-owned governed action. Save evidence before any legal handoff.',
+        instruction: options.productionContract
+          ? 'Perform only the specialist work in the authorized workspace. Do not mutate global workflow state. Return exactly one AgentResultV1; the Runner owns publication validation, checkpoints, and legal transitions.'
+          : 'Load the authoritative task and execute only the exact next role-owned governed action. Save evidence before any legal handoff.',
+        ...(workspace && contextManifest
+          ? {
+              contract: AGENT_RESULT_V1,
+              workspace,
+              context_manifest: contextManifest,
+            }
+          : {}),
       };
       try {
-        dispatch = await options.dispatcher.dispatch(packet, controller.signal);
-      } catch (error) {
-        if (!(error instanceof TransientPrelaunchError)) throw error;
-        await append('retry', 'TRANSIENT_PRELAUNCH', { attempt: 1 });
-        dispatch = await options.dispatcher.dispatch(packet, controller.signal);
+        try {
+          dispatch = await options.dispatcher.dispatch(packet, controller.signal);
+        } catch (error) {
+          if (!(error instanceof TransientPrelaunchError)) throw error;
+          await append('retry', 'TRANSIENT_PRELAUNCH', { attempt: 1 });
+          dispatch = await options.dispatcher.dispatch(packet, controller.signal);
+        }
+      } finally {
+        clearTimeout(timeout);
+        clearInterval(heartbeat);
+        if (stopMonitor) clearInterval(stopMonitor);
+        options.signal?.removeEventListener('abort', externalAbort);
       }
-    } finally {
-      clearTimeout(timeout);
-      clearInterval(heartbeat);
-      if (stopMonitor) clearInterval(stopMonitor);
-      options.signal?.removeEventListener('abort', externalAbort);
+      await heartbeatWork;
+      if (heartbeatFailure) throw heartbeatFailure;
+      if (options.productionContract) {
+        if (!dispatch.agentResult || !workspace || !contextManifest || !checkpointStore)
+          throw new Error('Shared production contract requires a validated AgentResultV1.');
+        const validatedResult = validateAgentResultV1(dispatch.agentResult, {
+          taskId: task.id,
+          role: task.owner,
+          state: task.state,
+          contextManifestSha256: contextManifest.manifest_sha256,
+        });
+        dispatch = {
+          ...dispatch,
+          agentOutcome: validatedResult.outcome,
+          agentResult: validatedResult,
+        };
+        if (validatedResult.completion) {
+          if (!options.productionContract.completionVerifier)
+            throw new Error('Alex completion lacks a configured fresh remote verifier.');
+          await options.productionContract.completionVerifier(
+            validatedResult.completion,
+            task,
+            options.signal ?? new AbortController().signal,
+          );
+        }
+        const unchangedTask = await readRunnerTask(options.companyRoot, options.taskId);
+        if (unchangedTask.bytes !== task.bytes || unchangedTask.path !== task.path)
+          throw new Error(
+            'Agent modified authoritative workflow state; Runner ownership is required.',
+          );
+        let publication = null;
+        if (validatedResult.publication) {
+          const publisher = options.productionContract.publisher ?? new ManifestBoundGitPublisher();
+          publication = await publisher.publish(workspace, validatedResult.publication);
+          await publisher.verifyReceipt(workspace, publication);
+        } else if (
+          workspace.publication === 'required' &&
+          validatedResult.outcome === 'completed'
+        ) {
+          throw new Error('Completed specialist work lacks its required Git publication request.');
+        }
+        contractCheckpoint = await checkpointStore.save({
+          task_id: task.id,
+          dispatch_id: decision.dispatch_id,
+          role: task.owner,
+          from_state: task.state,
+          result: validatedResult,
+          publication,
+          context_manifest_sha256: contextManifest.manifest_sha256,
+        });
+        await append('specialist_checkpoint', 'PERSISTED', {
+          checkpoint_sha256: contractCheckpoint.checkpoint_sha256,
+          publication_commit: publication?.commit_sha ?? null,
+        });
+      }
     }
-    await heartbeatWork;
-    if (heartbeatFailure) throw heartbeatFailure;
     // Timers are advisory under event-loop load: dispatch may settle before the
     // first interval callback runs.  Persist and verify one final heartbeat so
     // success can never be reported after lease persistence or ownership loss.
     await lease.renew(runId);
     await append('lease_heartbeat', 'RENEWED', { checkpoint: 'post_dispatch' });
-    const postTask = await readRunnerTask(options.companyRoot, options.taskId);
     let postOutcome = 'UNCHANGED';
-    if (postTask.bytes !== task.bytes) {
-      if (!isLegalRunnerTransition(task, postTask))
-        throw new Error(`Agent produced illegal transition ${task.state} -> ${postTask.state}.`);
-      const postFacts = await reconcileRunnerFacts(
-        options.companyRoot,
-        postTask,
-        options.githubResolver,
-      );
-      await verifyObservedTransition(options.companyRoot, task, postTask, postFacts);
-      postOutcome = 'OBSERVED_TRANSITION';
-      await append('observed_transition', postOutcome, {
-        from: task.state,
-        to: postTask.state,
-        owner: postTask.owner,
+    if (options.productionContract && contractCheckpoint?.result.outcome === 'completed') {
+      if (!isLegalRunnerTransition(task, { ...task, state: contractCheckpoint.result.next_state! }))
+        throw new Error(
+          `AgentResultV1 requested illegal transition ${task.state} -> ${contractCheckpoint.result.next_state}.`,
+        );
+      const transitionWriter =
+        options.productionContract.transitionWriter ??
+        new MarkdownRunnerTransitionWriter(options.companyRoot);
+      const transition = await transitionWriter.transition({
+        taskPath: task.path,
+        taskBytes: task.bytes,
+        fromState: task.state,
+        result: contractCheckpoint.result,
+        receipt: contractCheckpoint.publication,
+        checkpoint: contractCheckpoint,
       });
+      const transitionedTask = await readRunnerTask(options.companyRoot, options.taskId);
+      if (
+        transitionedTask.state !== transition.to_state ||
+        transitionedTask.owner !== transition.owner ||
+        !isLegalRunnerTransition(task, transitionedTask)
+      )
+        throw new Error('Runner-owned transition verification failed.');
+      postOutcome = 'RUNNER_TRANSITION';
+      await append('runner_transition', postOutcome, { ...transition });
+    } else {
+      const postTask = await readRunnerTask(options.companyRoot, options.taskId);
+      if (postTask.bytes !== task.bytes) {
+        if (!isLegalRunnerTransition(task, postTask))
+          throw new Error(`Agent produced illegal transition ${task.state} -> ${postTask.state}.`);
+        const postFacts = await reconcileRunnerFacts(
+          options.companyRoot,
+          postTask,
+          options.githubResolver,
+        );
+        await verifyObservedTransition(options.companyRoot, task, postTask, postFacts);
+        postOutcome = 'OBSERVED_TRANSITION';
+        await append('observed_transition', postOutcome, {
+          from: task.state,
+          to: postTask.state,
+          owner: postTask.owner,
+        });
+      }
     }
     const publicOutcome: RunnerOutcome =
       dispatch.agentOutcome === 'blocked'

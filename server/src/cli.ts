@@ -34,6 +34,7 @@ import {
   runCompanyOnce,
   runnerStatus,
 } from './companyRunner.js';
+import { launchCompanyRunnerV1 } from './companyRunnerV1Launcher.js';
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
@@ -82,6 +83,9 @@ export interface CliArgs {
   runnerPreflightConfig?: string;
   runnerAuthorization?: string;
   runnerReadinessAuthorization?: string;
+  runnerV1Launch?: boolean;
+  runnerV1Manifest?: string;
+  runnerV1Authorization?: string;
 }
 
 /** Thrown by parseArgs on an invalid --port. Kept separate from process.exit so
@@ -187,6 +191,14 @@ export function parseArgs(argv: string[]): CliArgs {
       args.runnerProductionLaunch = true;
     } else if (argv[i] === '--runner-production-readiness') {
       args.runnerProductionReadiness = true;
+    } else if (argv[i] === '--runner-v1-launch') {
+      args.runnerV1Launch = true;
+    } else if (argv[i] === '--runner-v1-manifest') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-v1-manifest.');
+      args.runnerV1Manifest = argv[++i];
+    } else if (argv[i] === '--runner-v1-authorization') {
+      if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-v1-authorization.');
+      args.runnerV1Authorization = argv[++i];
     } else if (argv[i] === '--runner-preflight-config') {
       if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-preflight-config.');
       args.runnerPreflightConfig = argv[++i];
@@ -233,6 +245,11 @@ Options:
                          Exact fresh Goi RED authorization artifact
   --runner-readiness-authorization <path>
                          Exact held recovery/readiness authorization artifact
+  --runner-v1-launch     Run the common Alex/Nova/Pixel/Atlas production contract once
+  --runner-v1-manifest <path>
+                         Manifest-bound role workspaces and deterministic context sources
+  --runner-v1-authorization <path>
+                         Exact owner RED authorization bound to the V1 manifest
   --help                Show this help message`);
       process.exit(0);
     }
@@ -250,8 +267,16 @@ export function validateRunnerCliMode(args: CliArgs): void {
     args.runnerFake ? '--runner-fake' : undefined,
   ].filter((option): option is string => option !== undefined);
 
+  const productionModes = [
+    args.runnerProductionLaunch,
+    args.runnerProductionReadiness,
+    args.runnerV1Launch,
+  ].filter(Boolean).length;
+  if (productionModes > 1)
+    throw new CliArgsError('Runner production modes are mutually exclusive.');
+
   if (
-    (args.runnerProductionLaunch || args.runnerProductionReadiness) &&
+    (args.runnerProductionLaunch || args.runnerProductionReadiness || args.runnerV1Launch) &&
     conflictingLegacyOptions.length > 0
   ) {
     throw new CliArgsError(
@@ -259,12 +284,10 @@ export function validateRunnerCliMode(args: CliArgs): void {
     );
   }
 
-  if (args.runnerProductionLaunch && args.runnerProductionReadiness)
-    throw new CliArgsError('Production launch and held readiness are mutually exclusive.');
-
   if (
     !args.runnerProductionLaunch &&
     !args.runnerProductionReadiness &&
+    !args.runnerV1Launch &&
     (args.runnerPreflightConfig !== undefined ||
       args.runnerAuthorization !== undefined ||
       args.runnerReadinessAuthorization !== undefined)
@@ -279,6 +302,18 @@ export function validateRunnerCliMode(args: CliArgs): void {
     throw new CliArgsError('Held readiness does not accept a launch authorization.');
   if (args.runnerProductionLaunch && args.runnerReadinessAuthorization)
     throw new CliArgsError('Production launch does not accept a readiness authorization.');
+  if (
+    !args.runnerV1Launch &&
+    (args.runnerV1Manifest !== undefined || args.runnerV1Authorization !== undefined)
+  )
+    throw new CliArgsError('V1 manifest and authorization require --runner-v1-launch.');
+  if (
+    args.runnerV1Launch &&
+    (args.runnerPreflightConfig !== undefined ||
+      args.runnerAuthorization !== undefined ||
+      args.runnerReadinessAuthorization !== undefined)
+  )
+    throw new CliArgsError('The V1 common launcher does not accept legacy activation inputs.');
 }
 
 // ── Main ──────────────────────────────────────────────────────
@@ -373,6 +408,29 @@ async function main(): Promise<void> {
           ),
         });
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (args.runnerV1Launch) {
+    if (!args.runnerV1Manifest || !args.runnerV1Authorization) {
+      console.error(
+        '[Pixel Agents] V1 launch requires --runner-v1-manifest and --runner-v1-authorization.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const result = await launchCompanyRunnerV1({
+        manifestPath: args.runnerV1Manifest,
+        authorizationPath: args.runnerV1Authorization,
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      console.error(
+        `[Pixel Agents] ${error instanceof Error ? error.message : 'Company Runner V1 launch failed closed.'}`,
+      );
+      process.exitCode = 1;
+    }
     return;
   }
 
