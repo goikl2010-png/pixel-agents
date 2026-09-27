@@ -64,6 +64,28 @@ function runCli(args: string[]): Promise<{ code: number | null; stdout: string; 
 }
 
 describe('parseArgs', () => {
+  it('parses only the common four-role Runner launch inputs', () => {
+    const args = parseArgs([
+      '--runner-v1-launch',
+      '--runner-v1-manifest',
+      'C:\\AI-Company\\runner-v1.json',
+      '--runner-v1-authorization',
+      'C:\\AI-Company\\runner-v1.authorization.json',
+    ]);
+    expect(args).toMatchObject({
+      runnerV1Launch: true,
+      runnerV1Manifest: 'C:\\AI-Company\\runner-v1.json',
+      runnerV1Authorization: 'C:\\AI-Company\\runner-v1.authorization.json',
+    });
+    expect(() => validateRunnerCliMode(args)).not.toThrow();
+    expect(() => validateRunnerCliMode({ ...args, runnerProductionLaunch: true })).toThrow(
+      'mutually exclusive',
+    );
+    expect(() => validateRunnerCliMode({ ...args, runnerTask: 'TASK-051' })).toThrow(
+      'cannot be combined',
+    );
+  });
+
   it('parses the explicit safe Company Runner V1 surface', () => {
     expect(
       parseArgs([
