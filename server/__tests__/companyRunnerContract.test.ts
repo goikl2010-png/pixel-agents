@@ -517,7 +517,10 @@ it('general launcher selects the authoritative role and preserves the HOLD bound
   ).resolves.toMatchObject({ outcome: 'DISPATCHED', decision: { owner: 'Alex' } });
   expect(calls).toEqual(['Alex']);
   expect(gates).toEqual([
-    { consumer: 'CompanyRunner', workspace: await realpath(path.join(fixture.company, 'runner-live')) },
+    {
+      consumer: 'CompanyRunner',
+      workspace: await realpath(path.join(fixture.company, 'runner-live')),
+    },
     { consumer: 'RoleOperator', workspace: await realpath(fixture.workspace) },
   ]);
 });

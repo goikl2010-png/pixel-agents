@@ -78,12 +78,12 @@ describe('parseArgs', () => {
       runnerV1Authorization: 'C:\\AI-Company\\runner-v1.authorization.json',
     });
     expect(() => validateRunnerCliMode(args)).not.toThrow();
-    expect(() =>
-      validateRunnerCliMode({ ...args, runnerProductionLaunch: true }),
-    ).toThrow('mutually exclusive');
-    expect(() =>
-      validateRunnerCliMode({ ...args, runnerTask: 'TASK-051' }),
-    ).toThrow('cannot be combined');
+    expect(() => validateRunnerCliMode({ ...args, runnerProductionLaunch: true })).toThrow(
+      'mutually exclusive',
+    );
+    expect(() => validateRunnerCliMode({ ...args, runnerTask: 'TASK-051' })).toThrow(
+      'cannot be combined',
+    );
   });
 
   it('parses the explicit safe Company Runner V1 surface', () => {
