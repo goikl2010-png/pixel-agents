@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { createHash } from 'crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
@@ -438,12 +438,15 @@ async function launcherManifest(
   activationHold: boolean,
 ): Promise<{ path: string; bytes: string }> {
   const schema = path.join(fixture.company, 'agent-result.schema.json');
+  const runnerWorktree = path.join(fixture.company, 'runner-live');
+  await mkdir(runnerWorktree, { recursive: true });
   await writeFile(schema, '{}\n');
   const manifest: CompanyRunnerV1Manifest = {
     schema_version: '1',
     activation_hold: activationHold,
     task_id: 'TASK-051',
     company_root: fixture.company,
+    runner_worktree: runnerWorktree,
     state_directory: fixture.stateDirectory,
     stop_file: path.join(fixture.stateDirectory, 'STOP'),
     executable: path.join(fixture.company, 'codex'),
@@ -479,19 +482,19 @@ it('general launcher selects the authoritative role and preserves the HOLD bound
     task_id: 'TASK-051',
     manifest_sha256: `sha256:${createHash('sha256').update(held.bytes).digest('hex')}`,
   };
-  let gates = 0;
+  const gates: Array<{ consumer: string; workspace: string }> = [];
   await expect(
     launchCompanyRunnerV1({
       manifestPath: held.path,
       authorization: heldAuthorization,
-      governanceGate: async () => {
-        gates++;
+      governanceGate: async (_role, _taskId, workspace, consumer) => {
+        gates.push({ consumer, workspace });
       },
       dispatcher: lifecycleDispatcher([]),
       githubResolver,
     }),
   ).rejects.toThrow('HOLD');
-  expect(gates).toBe(0);
+  expect(gates).toEqual([]);
 
   const fixture = await lifecycleFixture();
   const active = await launcherManifest(fixture, false);
@@ -503,16 +506,47 @@ it('general launcher selects the authoritative role and preserves the HOLD bound
         ...heldAuthorization,
         manifest_sha256: `sha256:${createHash('sha256').update(active.bytes).digest('hex')}`,
       },
-      governanceGate: async (role) => {
+      governanceGate: async (role, taskId, workspace, consumer) => {
         expect(role).toBe('Alex');
-        gates++;
+        expect(taskId).toBe('TASK-051');
+        gates.push({ consumer, workspace });
       },
       dispatcher: lifecycleDispatcher(calls),
       githubResolver,
     }),
   ).resolves.toMatchObject({ outcome: 'DISPATCHED', decision: { owner: 'Alex' } });
   expect(calls).toEqual(['Alex']);
-  expect(gates).toBe(1);
+  expect(gates).toEqual([
+    { consumer: 'CompanyRunner', workspace: await realpath(path.join(fixture.company, 'runner-live')) },
+    { consumer: 'RoleOperator', workspace: await realpath(fixture.workspace) },
+  ]);
+});
+
+it('fails closed when the narrow role-workspace gate rejects after live Runner admission', async () => {
+  const fixture = await lifecycleFixture();
+  const active = await launcherManifest(fixture, false);
+  const calls: EmployeeIdentity[] = [];
+  const consumers: string[] = [];
+  await expect(
+    launchCompanyRunnerV1({
+      manifestPath: active.path,
+      authorization: {
+        schema_version: '1',
+        authorization: 'RED',
+        authorized_by: 'Goi',
+        task_id: 'TASK-051',
+        manifest_sha256: `sha256:${createHash('sha256').update(active.bytes).digest('hex')}`,
+      },
+      governanceGate: async (_role, _taskId, _workspace, consumer) => {
+        consumers.push(consumer);
+        if (consumer === 'RoleOperator') throw new Error('role workspace rejected');
+      },
+      dispatcher: lifecycleDispatcher(calls),
+      githubResolver,
+    }),
+  ).rejects.toThrow('governance integrity gate failed closed');
+  expect(consumers).toEqual(['CompanyRunner', 'RoleOperator']);
+  expect(calls).toEqual([]);
 });
 
 it('runs the legal Alex -> Nova -> Pixel PASS -> Atlas APPROVED -> Alex -> COMPLETE path', async () => {

@@ -33,6 +33,7 @@ export interface CompanyRunnerV1Manifest {
   activation_hold: boolean;
   task_id: string;
   company_root: string;
+  runner_worktree: string;
   state_directory: string;
   stop_file: string;
   executable: string;
@@ -60,7 +61,12 @@ export interface CompanyRunnerV1LaunchOptions {
   parentEnvironment?: NodeJS.ProcessEnv;
   dispatcher?: AgentDispatcher;
   githubResolver?: GitHubFactResolver;
-  governanceGate?: (role: EmployeeIdentity, taskId: string, workspace: string) => Promise<void>;
+  governanceGate?: (
+    role: EmployeeIdentity,
+    taskId: string,
+    workspace: string,
+    consumer: 'CompanyRunner' | 'RoleOperator',
+  ) => Promise<void>;
 }
 
 const ROLES: EmployeeIdentity[] = ['Alex', 'Nova', 'Pixel', 'Atlas'];
@@ -85,6 +91,7 @@ function assertManifest(value: unknown): asserts value is CompanyRunnerV1Manifes
       'activation_hold',
       'task_id',
       'company_root',
+      'runner_worktree',
       'state_directory',
       'stop_file',
       'executable',
@@ -100,7 +107,14 @@ function assertManifest(value: unknown): asserts value is CompanyRunnerV1Manifes
     typeof manifest.activation_hold !== 'boolean' ||
     typeof manifest.task_id !== 'string' ||
     !/^TASK-\d+$/.test(manifest.task_id) ||
-    !['company_root', 'state_directory', 'stop_file', 'executable', 'output_schema'].every(
+    ![
+      'company_root',
+      'runner_worktree',
+      'state_directory',
+      'stop_file',
+      'executable',
+      'output_schema',
+    ].every(
       (key) => typeof manifest[key] === 'string' && path.isAbsolute(manifest[key] as string),
     ) ||
     !['timeout_ms', 'lease_ttl_ms', 'heartbeat_ms', 'circuit_failure_threshold'].every(
@@ -171,39 +185,55 @@ export async function launchCompanyRunnerV1(
   assertAuthorization(authorization, manifest, sha256(manifestBytes));
   const task = await readRunnerTask(manifest.company_root, manifest.task_id);
   const rawWorkspace = manifest.workspaces.find((candidate) => candidate.role === task.owner);
-  const workspace = validateWorkspaceDescriptorV1(rawWorkspace, {
+  const validatedWorkspace = validateWorkspaceDescriptorV1(rawWorkspace, {
     taskId: task.id,
     role: task.owner,
   });
-  try {
+  const [runnerWorktree, roleWorktree] = await Promise.all([
+    fs.realpath(manifest.runner_worktree),
+    fs.realpath(validatedWorkspace.root),
+  ]);
+  const comparable = (value: string): string =>
+    process.platform === 'win32' ? value.toLowerCase() : value;
+  if (comparable(runnerWorktree) === comparable(roleWorktree))
+    throw new Error('Company Runner and role workspaces must remain isolated.');
+  const workspace = { ...validatedWorkspace, root: roleWorktree };
+  const runGate = async (
+    consumer: 'CompanyRunner' | 'RoleOperator',
+    worktree: string,
+  ): Promise<void> => {
     if (options.governanceGate) {
-      await options.governanceGate(task.owner, task.id, workspace.root);
-    } else {
-      await execFileAsync(
-        process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-File',
-          path.join(manifest.company_root, 'scripts', 'Test-GovernanceIntegrity.ps1'),
-          '-ManifestPath',
-          path.join(manifest.company_root, 'config', 'governance-integrity.json'),
-          '-Role',
-          task.owner,
-          '-Operation',
-          'Admission',
-          '-TaskId',
-          task.id,
-          '-WorktreePath',
-          workspace.root,
-          '-Consumer',
-          'CompanyRunner',
-        ],
-        { cwd: manifest.company_root, timeout: 180_000, windowsHide: true },
-      );
+      await options.governanceGate(task.owner, task.id, worktree, consumer);
+      return;
     }
+    await execFileAsync(
+      process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        path.join(manifest.company_root, 'scripts', 'Test-GovernanceIntegrity.ps1'),
+        '-ManifestPath',
+        path.join(manifest.company_root, 'config', 'governance-integrity.json'),
+        '-Role',
+        task.owner,
+        '-Operation',
+        'Admission',
+        '-TaskId',
+        task.id,
+        '-WorktreePath',
+        worktree,
+        '-Consumer',
+        consumer,
+      ],
+      { cwd: manifest.company_root, timeout: 180_000, windowsHide: true },
+    );
+  };
+  try {
+    await runGate('CompanyRunner', runnerWorktree);
+    await runGate('RoleOperator', roleWorktree);
   } catch {
     throw new Error('Company Runner V1 shared governance integrity gate failed closed.');
   }
