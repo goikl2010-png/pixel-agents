@@ -1,0 +1,72 @@
+{
+  "schema_version": "1",
+  "activation_hold": true,
+  "task_id": "TASK-000",
+  "company_root": "C:\\AI-Company",
+  "runner_worktree": "C:\\AI-Company\\.worktrees\\TASK-024-LIVE",
+  "state_directory": "C:\\AI-Company\\.company-runner-state\\TASK-000",
+  "stop_file": "C:\\AI-Company\\.company-runner-state\\TASK-000\\STOP",
+  "executable": "C:\\Users\\X1 CARBON\\AppData\\Roaming\\npm\\codex.cmd",
+  "output_schema": "C:\\AI-Company\\.worktrees\\TASK-024-LIVE\\docs\\schemas\\company-runner-agent-result-v1.schema.json",
+  "timeout_ms": 180000,
+  "lease_ttl_ms": 30000,
+  "heartbeat_ms": 10000,
+  "circuit_failure_threshold": 3,
+  "workspaces": [
+    {
+      "schema_version": "1",
+      "task_id": "TASK-000",
+      "role": "Alex",
+      "repository": "goikl2010-png/AI-Company",
+      "root": "C:\\AI-Company\\.worktrees\\TASK-000",
+      "branch": "task/TASK-000-held-readiness-target",
+      "base_sha": "0000000000000000000000000000000000000000",
+      "allowed_paths": ["tasks/"],
+      "protected_paths": ["config/governance-integrity.json"],
+      "publication": "not-required"
+    },
+    {
+      "schema_version": "1",
+      "task_id": "TASK-000",
+      "role": "Nova",
+      "repository": "goikl2010-png/pixel-agents",
+      "root": "C:\\AI-Company\\.worktrees\\TASK-000-RUNNER",
+      "branch": "task/TASK-000-held-readiness",
+      "base_sha": "0000000000000000000000000000000000000000",
+      "allowed_paths": ["server/"],
+      "protected_paths": ["config/governance-integrity.json"],
+      "publication": "required"
+    },
+    {
+      "schema_version": "1",
+      "task_id": "TASK-000",
+      "role": "Pixel",
+      "repository": "goikl2010-png/AI-Company",
+      "root": "C:\\AI-Company\\.worktrees\\TASK-000",
+      "branch": "task/TASK-000-held-readiness-target",
+      "base_sha": "0000000000000000000000000000000000000000",
+      "allowed_paths": ["documentation/qa/"],
+      "protected_paths": ["config/governance-integrity.json"],
+      "publication": "not-required"
+    },
+    {
+      "schema_version": "1",
+      "task_id": "TASK-000",
+      "role": "Atlas",
+      "repository": "goikl2010-png/AI-Company",
+      "root": "C:\\AI-Company\\.worktrees\\TASK-000",
+      "branch": "task/TASK-000-held-readiness-target",
+      "base_sha": "0000000000000000000000000000000000000000",
+      "allowed_paths": ["documentation/reviews/"],
+      "protected_paths": ["config/governance-integrity.json"],
+      "publication": "not-required"
+    }
+  ],
+  "context_sources": [
+    {
+      "id": "company-memory",
+      "path": "C:\\AI-Company\\COMPANY-MEMORY.md",
+      "roles": ["Alex", "Nova", "Pixel", "Atlas"]
+    }
+  ]
+}

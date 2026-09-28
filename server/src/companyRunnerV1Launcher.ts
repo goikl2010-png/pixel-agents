@@ -12,13 +12,16 @@ import {
   type GitHubFactResolver,
   readRunnerTask,
   runCompanyOnce,
+  type RunnerTask,
   type RunOnceResult,
 } from './companyRunner.js';
 import {
+  buildContextManifestV1,
+  type ContextManifestV1,
   ManifestBoundGitPublisher,
   MarkdownRunnerTransitionWriter,
+  resolveWorkspaceDescriptorV1,
   SpecialistCheckpointStore,
-  validateWorkspaceDescriptorV1,
   type WorkspaceDescriptorV1,
 } from './companyRunnerContract.js';
 
@@ -61,12 +64,42 @@ export interface CompanyRunnerV1LaunchOptions {
   parentEnvironment?: NodeJS.ProcessEnv;
   dispatcher?: AgentDispatcher;
   githubResolver?: GitHubFactResolver;
-  governanceGate?: (
-    role: EmployeeIdentity,
-    taskId: string,
-    workspace: string,
-    consumer: 'CompanyRunner' | 'RoleOperator',
-  ) => Promise<void>;
+  governanceGate?: CompanyRunnerV1GovernanceGate;
+}
+
+export interface CompanyRunnerV1ReadinessOptions {
+  manifestPath: string;
+  governanceGate?: CompanyRunnerV1GovernanceGate;
+}
+
+export interface CompanyRunnerV1ReadinessResult {
+  schema_version: '1';
+  task_id: string;
+  role: EmployeeIdentity;
+  outcome: 'HELD_READY';
+  manifest_sha256: string;
+  context_manifest_sha256: string;
+  runner_worktree: string;
+  role_worktree: string;
+}
+
+type CompanyRunnerV1GovernanceConsumer =
+  'CompanyRunner' | 'CompanyRunnerReadiness' | 'RoleOperator';
+
+type CompanyRunnerV1GovernanceGate = (
+  role: EmployeeIdentity,
+  taskId: string,
+  workspace: string,
+  consumer: CompanyRunnerV1GovernanceConsumer,
+) => Promise<void>;
+
+interface CompanyRunnerV1ResolvedInputs {
+  manifest: CompanyRunnerV1Manifest;
+  manifestHash: string;
+  task: RunnerTask;
+  workspace: WorkspaceDescriptorV1;
+  runnerWorktree: string;
+  checkpointStore: SpecialistCheckpointStore;
 }
 
 const ROLES: EmployeeIdentity[] = ['Alex', 'Nova', 'Pixel', 'Atlas'];
@@ -167,6 +200,179 @@ function assertAuthorization(
     throw new Error('Company Runner V1 owner authorization is absent, malformed, or drifted.');
 }
 
+async function runGovernanceGate(
+  manifest: CompanyRunnerV1Manifest,
+  task: RunnerTask,
+  worktree: string,
+  consumer: CompanyRunnerV1GovernanceConsumer,
+  governanceGate?: CompanyRunnerV1GovernanceGate,
+): Promise<void> {
+  if (governanceGate) {
+    await governanceGate(task.owner, task.id, worktree, consumer);
+    return;
+  }
+  await execFileAsync(
+    process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      path.join(manifest.company_root, 'scripts', 'Test-GovernanceIntegrity.ps1'),
+      '-ManifestPath',
+      path.join(manifest.company_root, 'config', 'governance-integrity.json'),
+      '-Role',
+      task.owner,
+      '-Operation',
+      'Admission',
+      '-TaskId',
+      task.id,
+      '-WorktreePath',
+      worktree,
+      '-Consumer',
+      consumer,
+    ],
+    { cwd: manifest.company_root, timeout: 180_000, windowsHide: true },
+  );
+}
+
+async function resolveCompanyRunnerV1Inputs(
+  manifest: CompanyRunnerV1Manifest,
+  manifestHash: string,
+  runnerConsumer: 'CompanyRunner' | 'CompanyRunnerReadiness',
+  governanceGate?: CompanyRunnerV1GovernanceGate,
+): Promise<CompanyRunnerV1ResolvedInputs> {
+  const task = await readRunnerTask(manifest.company_root, manifest.task_id);
+  const rawWorkspace = manifest.workspaces.find((candidate) => candidate.role === task.owner);
+  const workspace = await resolveWorkspaceDescriptorV1(rawWorkspace, {
+    taskId: task.id,
+    role: task.owner,
+  });
+  const runnerWorktree = await fs.realpath(manifest.runner_worktree);
+  const comparable = (value: string): string =>
+    process.platform === 'win32' ? value.toLowerCase() : value;
+  if (comparable(runnerWorktree) === comparable(workspace.root))
+    throw new Error('Company Runner and role workspaces must remain isolated.');
+  try {
+    await runGovernanceGate(manifest, task, runnerWorktree, runnerConsumer, governanceGate);
+    await runGovernanceGate(manifest, task, workspace.root, 'RoleOperator', governanceGate);
+  } catch {
+    throw new Error('Company Runner V1 shared governance integrity gate failed closed.');
+  }
+  return {
+    manifest,
+    manifestHash,
+    task,
+    workspace,
+    runnerWorktree,
+    checkpointStore: new SpecialistCheckpointStore(
+      path.join(manifest.state_directory, 'checkpoints'),
+    ),
+  };
+}
+
+async function contextSourcesForTask(
+  manifest: CompanyRunnerV1Manifest,
+  task: RunnerTask,
+  role: EmployeeIdentity,
+  checkpointStore: SpecialistCheckpointStore,
+): Promise<Array<{ id: string; path: string }>> {
+  const configured = manifest.context_sources
+    .filter((source) => source.roles.includes(role))
+    .map(({ id, path: sourcePath }) => ({ id, path: sourcePath }));
+  const checkpointDirectory = path.join(manifest.state_directory, 'checkpoints', task.id);
+  let checkpointNames: string[] = [];
+  try {
+    checkpointNames = (await fs.readdir(checkpointDirectory))
+      .filter((name) => name.endsWith('.json'))
+      .sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const priorStateCheckpoints: Array<{ id: string; path: string }> = [];
+  for (const name of checkpointNames) {
+    const dispatchId = `sha256:${path.basename(name, '.json')}`;
+    const checkpoint = await checkpointStore.load(task.id, dispatchId);
+    if (!checkpoint)
+      throw new Error('Enumerated specialist checkpoint disappeared during context loading.');
+    if (checkpoint.from_state !== task.state)
+      priorStateCheckpoints.push({
+        id: `checkpoint-${path.basename(name, '.json')}`,
+        path: path.join(checkpointDirectory, name),
+      });
+  }
+  return [{ id: 'authoritative-task', path: task.path }, ...configured, ...priorStateCheckpoints];
+}
+
+async function assertFile(pathname: string, label: string): Promise<void> {
+  const stat = await fs.stat(await fs.realpath(pathname));
+  if (!stat.isFile()) throw new Error(`${label} is not a file.`);
+}
+
+async function pathExists(pathname: string): Promise<boolean> {
+  try {
+    await fs.access(pathname);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+export async function prepareCompanyRunnerV1Readiness(
+  options: CompanyRunnerV1ReadinessOptions,
+): Promise<CompanyRunnerV1ReadinessResult> {
+  const manifestBytes = await fs.readFile(options.manifestPath, 'utf8');
+  const parsed = JSON.parse(manifestBytes) as unknown;
+  assertManifest(parsed);
+  if (!parsed.activation_hold)
+    throw new Error('Company Runner V1 held readiness requires activation HOLD.');
+  const resolved = await resolveCompanyRunnerV1Inputs(
+    parsed,
+    sha256(manifestBytes),
+    'CompanyRunnerReadiness',
+    options.governanceGate,
+  );
+  await Promise.all([
+    assertFile(resolved.manifest.executable, 'Company Runner V1 executable'),
+    assertFile(resolved.manifest.output_schema, 'Company Runner V1 output schema'),
+  ]);
+  if (await pathExists(resolved.manifest.stop_file))
+    throw new Error('Company Runner V1 stop control is asserted.');
+  const leasePath = path.join(
+    resolved.manifest.state_directory,
+    'leases',
+    `${resolved.task.id}.lock`,
+  );
+  if (await pathExists(leasePath)) throw new Error('Company Runner V1 task lease is active.');
+  const contextManifest: ContextManifestV1 = await buildContextManifestV1({
+    taskId: resolved.task.id,
+    role: resolved.task.owner,
+    roots: [
+      resolved.manifest.company_root,
+      resolved.workspace.root,
+      resolved.manifest.state_directory,
+    ],
+    sources: await contextSourcesForTask(
+      resolved.manifest,
+      resolved.task,
+      resolved.task.owner,
+      resolved.checkpointStore,
+    ),
+  });
+  return {
+    schema_version: '1',
+    task_id: resolved.task.id,
+    role: resolved.task.owner,
+    outcome: 'HELD_READY',
+    manifest_sha256: resolved.manifestHash,
+    context_manifest_sha256: contextManifest.manifest_sha256,
+    runner_worktree: resolved.runnerWorktree,
+    role_worktree: resolved.workspace.root,
+  };
+}
+
 export async function launchCompanyRunnerV1(
   options: CompanyRunnerV1LaunchOptions,
 ): Promise<RunOnceResult> {
@@ -183,60 +389,13 @@ export async function launchCompanyRunnerV1(
         await fs.readFile(options.authorizationPath!, 'utf8'),
       ) as CompanyRunnerV1OwnerAuthorization);
   assertAuthorization(authorization, manifest, sha256(manifestBytes));
-  const task = await readRunnerTask(manifest.company_root, manifest.task_id);
-  const rawWorkspace = manifest.workspaces.find((candidate) => candidate.role === task.owner);
-  const validatedWorkspace = validateWorkspaceDescriptorV1(rawWorkspace, {
-    taskId: task.id,
-    role: task.owner,
-  });
-  const [runnerWorktree, roleWorktree] = await Promise.all([
-    fs.realpath(manifest.runner_worktree),
-    fs.realpath(validatedWorkspace.root),
-  ]);
-  const comparable = (value: string): string =>
-    process.platform === 'win32' ? value.toLowerCase() : value;
-  if (comparable(runnerWorktree) === comparable(roleWorktree))
-    throw new Error('Company Runner and role workspaces must remain isolated.');
-  const workspace = { ...validatedWorkspace, root: roleWorktree };
-  const runGate = async (
-    consumer: 'CompanyRunner' | 'RoleOperator',
-    worktree: string,
-  ): Promise<void> => {
-    if (options.governanceGate) {
-      await options.governanceGate(task.owner, task.id, worktree, consumer);
-      return;
-    }
-    await execFileAsync(
-      process.platform === 'win32' ? 'powershell.exe' : 'pwsh',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        path.join(manifest.company_root, 'scripts', 'Test-GovernanceIntegrity.ps1'),
-        '-ManifestPath',
-        path.join(manifest.company_root, 'config', 'governance-integrity.json'),
-        '-Role',
-        task.owner,
-        '-Operation',
-        'Admission',
-        '-TaskId',
-        task.id,
-        '-WorktreePath',
-        worktree,
-        '-Consumer',
-        consumer,
-      ],
-      { cwd: manifest.company_root, timeout: 180_000, windowsHide: true },
-    );
-  };
-  try {
-    await runGate('CompanyRunner', runnerWorktree);
-    await runGate('RoleOperator', roleWorktree);
-  } catch {
-    throw new Error('Company Runner V1 shared governance integrity gate failed closed.');
-  }
+  const resolved = await resolveCompanyRunnerV1Inputs(
+    manifest,
+    sha256(manifestBytes),
+    'CompanyRunner',
+    options.governanceGate,
+  );
+  const { workspace, checkpointStore } = resolved;
   const outputSchema = path.resolve(manifest.output_schema);
   const dispatcher =
     options.dispatcher ??
@@ -258,9 +417,6 @@ export async function launchCompanyRunnerV1(
       parentEnvironment: options.parentEnvironment,
       includePullRequestScope: true,
     });
-  const checkpointStore = new SpecialistCheckpointStore(
-    path.join(manifest.state_directory, 'checkpoints'),
-  );
   return runCompanyOnce({
     companyRoot: manifest.company_root,
     taskId: manifest.task_id,
@@ -275,41 +431,8 @@ export async function launchCompanyRunnerV1(
     productionContract: {
       workspace,
       contextRoots: [manifest.company_root, workspace.root, manifest.state_directory],
-      contextSources: async (currentTask, role) => {
-        const configured = manifest.context_sources
-          .filter((source) => source.roles.includes(role))
-          .map(({ id, path: sourcePath }) => ({ id, path: sourcePath }));
-        const checkpointDirectory = path.join(
-          manifest.state_directory,
-          'checkpoints',
-          currentTask.id,
-        );
-        let checkpointNames: string[] = [];
-        try {
-          checkpointNames = (await fs.readdir(checkpointDirectory))
-            .filter((name) => name.endsWith('.json'))
-            .sort();
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
-        const priorStateCheckpoints: Array<{ id: string; path: string }> = [];
-        for (const name of checkpointNames) {
-          const dispatchId = `sha256:${path.basename(name, '.json')}`;
-          const checkpoint = await checkpointStore.load(currentTask.id, dispatchId);
-          if (!checkpoint)
-            throw new Error('Enumerated specialist checkpoint disappeared during context loading.');
-          if (checkpoint.from_state !== currentTask.state)
-            priorStateCheckpoints.push({
-              id: `checkpoint-${path.basename(name, '.json')}`,
-              path: path.join(checkpointDirectory, name),
-            });
-        }
-        return [
-          { id: 'authoritative-task', path: currentTask.path },
-          ...configured,
-          ...priorStateCheckpoints,
-        ];
-      },
+      contextSources: (currentTask, role) =>
+        contextSourcesForTask(manifest, currentTask, role, checkpointStore),
       publisher: new ManifestBoundGitPublisher(),
       checkpointStore,
       transitionWriter: new MarkdownRunnerTransitionWriter(manifest.company_root),

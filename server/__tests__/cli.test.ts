@@ -86,6 +86,25 @@ describe('parseArgs', () => {
     );
   });
 
+  it('parses held common-contract readiness without launch authorization', () => {
+    const readiness = parseArgs([
+      '--runner-v1-readiness',
+      '--runner-v1-manifest',
+      'C:\\AI-Company\\runner-v1.held.json',
+    ]);
+    expect(readiness).toMatchObject({
+      runnerV1Readiness: true,
+      runnerV1Manifest: 'C:\\AI-Company\\runner-v1.held.json',
+    });
+    expect(() => validateRunnerCliMode(readiness)).not.toThrow();
+    expect(() =>
+      validateRunnerCliMode({ ...readiness, runnerV1Authorization: 'launch.json' }),
+    ).toThrow('does not accept a launch authorization');
+    expect(() => validateRunnerCliMode({ ...readiness, runnerV1Launch: true })).toThrow(
+      'mutually exclusive',
+    );
+  });
+
   it('parses the explicit safe Company Runner V1 surface', () => {
     expect(
       parseArgs([
