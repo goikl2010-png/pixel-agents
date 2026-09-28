@@ -29,6 +29,7 @@ import {
 import {
   type CompanyRunnerV1Manifest,
   launchCompanyRunnerV1,
+  prepareCompanyRunnerV1Readiness,
 } from '../src/companyRunnerV1Launcher.js';
 import type { LifecycleState } from '../src/handoffTransitionPlanner.js';
 
@@ -439,7 +440,10 @@ async function launcherManifest(
 ): Promise<{ path: string; bytes: string }> {
   const schema = path.join(fixture.company, 'agent-result.schema.json');
   const runnerWorktree = path.join(fixture.company, 'runner-live');
-  await mkdir(runnerWorktree, { recursive: true });
+  await Promise.all([
+    mkdir(runnerWorktree, { recursive: true }),
+    mkdir(fixture.stateDirectory, { recursive: true }),
+  ]);
   await writeFile(schema, '{}\n');
   const manifest: CompanyRunnerV1Manifest = {
     schema_version: '1',
@@ -471,6 +475,80 @@ async function launcherManifest(
   await writeFile(manifestPath, bytes);
   return { path: manifestPath, bytes };
 }
+
+it('validates the held common-launch package without attempt, lease, ledger, or dispatch', async () => {
+  const fixture = await lifecycleFixture();
+  const held = await launcherManifest(fixture, true);
+  const executable = path.join(fixture.company, 'codex');
+  await writeFile(executable, 'fixture executable\n');
+  const taskPath = path.join(fixture.company, 'tasks', 'backlog', 'task.md');
+  const taskBefore = await readFile(taskPath, 'utf8');
+  const gates: Array<{ consumer: string; workspace: string }> = [];
+
+  await expect(
+    prepareCompanyRunnerV1Readiness({
+      manifestPath: held.path,
+      governanceGate: async (_role, _taskId, workspace, consumer) => {
+        gates.push({ consumer, workspace });
+      },
+    }),
+  ).resolves.toMatchObject({
+    schema_version: '1',
+    task_id: 'TASK-051',
+    role: 'Alex',
+    outcome: 'HELD_READY',
+    manifest_sha256: `sha256:${createHash('sha256').update(held.bytes).digest('hex')}`,
+  });
+  expect(gates).toEqual([
+    {
+      consumer: 'CompanyRunnerReadiness',
+      workspace: await realpath(path.join(fixture.company, 'runner-live')),
+    },
+    { consumer: 'RoleOperator', workspace: await realpath(fixture.workspace) },
+  ]);
+  expect(await readFile(taskPath, 'utf8')).toBe(taskBefore);
+  await expect(readFile(path.join(fixture.stateDirectory, 'TASK-051.jsonl'))).rejects.toThrow();
+  await expect(
+    readFile(path.join(fixture.stateDirectory, 'leases', 'TASK-051.lock')),
+  ).rejects.toThrow();
+  await expect(
+    readFile(path.join(fixture.stateDirectory, 'checkpoints', 'TASK-051')),
+  ).rejects.toThrow();
+});
+
+it('held common-launch readiness rejects released HOLD before governance or state activity', async () => {
+  const fixture = await lifecycleFixture();
+  const active = await launcherManifest(fixture, false);
+  const gates: string[] = [];
+  await expect(
+    prepareCompanyRunnerV1Readiness({
+      manifestPath: active.path,
+      governanceGate: async (_role, _taskId, _workspace, consumer) => {
+        gates.push(consumer);
+      },
+    }),
+  ).rejects.toThrow('requires activation HOLD');
+  expect(gates).toEqual([]);
+  await expect(readFile(path.join(fixture.stateDirectory, 'TASK-051.jsonl'))).rejects.toThrow();
+});
+
+it('ships an inactive authorization-free common-launch readiness package template', async () => {
+  const template = JSON.parse(
+    await readFile(
+      path.resolve(__dirname, '../../config/company-runner-v1-held-readiness.template.json'),
+      'utf8',
+    ),
+  ) as Record<string, unknown>;
+  expect(template).toMatchObject({ schema_version: '1', activation_hold: true });
+  expect(template).not.toHaveProperty('authorization');
+  expect(template).not.toHaveProperty('attempt_id');
+  expect((template.workspaces as Array<{ role: string }>).map(({ role }) => role).sort()).toEqual([
+    'Alex',
+    'Atlas',
+    'Nova',
+    'Pixel',
+  ]);
+});
 
 it('general launcher selects the authoritative role and preserves the HOLD boundary', async () => {
   const heldFixture = await lifecycleFixture();

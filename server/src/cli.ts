@@ -34,7 +34,10 @@ import {
   runCompanyOnce,
   runnerStatus,
 } from './companyRunner.js';
-import { launchCompanyRunnerV1 } from './companyRunnerV1Launcher.js';
+import {
+  launchCompanyRunnerV1,
+  prepareCompanyRunnerV1Readiness,
+} from './companyRunnerV1Launcher.js';
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
@@ -84,6 +87,7 @@ export interface CliArgs {
   runnerAuthorization?: string;
   runnerReadinessAuthorization?: string;
   runnerV1Launch?: boolean;
+  runnerV1Readiness?: boolean;
   runnerV1Manifest?: string;
   runnerV1Authorization?: string;
 }
@@ -193,6 +197,8 @@ export function parseArgs(argv: string[]): CliArgs {
       args.runnerProductionReadiness = true;
     } else if (argv[i] === '--runner-v1-launch') {
       args.runnerV1Launch = true;
+    } else if (argv[i] === '--runner-v1-readiness') {
+      args.runnerV1Readiness = true;
     } else if (argv[i] === '--runner-v1-manifest') {
       if (!argv[i + 1]) throw new CliArgsError('Missing value for --runner-v1-manifest.');
       args.runnerV1Manifest = argv[++i];
@@ -246,6 +252,7 @@ Options:
   --runner-readiness-authorization <path>
                          Exact held recovery/readiness authorization artifact
   --runner-v1-launch     Run the common Alex/Nova/Pixel/Atlas production contract once
+  --runner-v1-readiness  Validate the held common-contract package without dispatch
   --runner-v1-manifest <path>
                          Manifest-bound role workspaces and deterministic context sources
   --runner-v1-authorization <path>
@@ -271,16 +278,24 @@ export function validateRunnerCliMode(args: CliArgs): void {
     args.runnerProductionLaunch,
     args.runnerProductionReadiness,
     args.runnerV1Launch,
+    args.runnerV1Readiness,
   ].filter(Boolean).length;
   if (productionModes > 1)
     throw new CliArgsError('Runner production modes are mutually exclusive.');
 
   if (
-    (args.runnerProductionLaunch || args.runnerProductionReadiness || args.runnerV1Launch) &&
+    (args.runnerProductionLaunch ||
+      args.runnerProductionReadiness ||
+      args.runnerV1Launch ||
+      args.runnerV1Readiness) &&
     conflictingLegacyOptions.length > 0
   ) {
     throw new CliArgsError(
-      `${args.runnerProductionLaunch ? '--runner-production-launch' : '--runner-production-readiness'} cannot be combined with legacy Runner options: ${conflictingLegacyOptions.join(', ')}.`,
+      (args.runnerProductionLaunch
+        ? '--runner-production-launch cannot be combined with legacy Runner options: '
+        : 'Runner production/readiness modes cannot be combined with legacy Runner options: ') +
+        conflictingLegacyOptions.join(', ') +
+        '.',
     );
   }
 
@@ -288,6 +303,7 @@ export function validateRunnerCliMode(args: CliArgs): void {
     !args.runnerProductionLaunch &&
     !args.runnerProductionReadiness &&
     !args.runnerV1Launch &&
+    !args.runnerV1Readiness &&
     (args.runnerPreflightConfig !== undefined ||
       args.runnerAuthorization !== undefined ||
       args.runnerReadinessAuthorization !== undefined)
@@ -304,11 +320,14 @@ export function validateRunnerCliMode(args: CliArgs): void {
     throw new CliArgsError('Production launch does not accept a readiness authorization.');
   if (
     !args.runnerV1Launch &&
+    !args.runnerV1Readiness &&
     (args.runnerV1Manifest !== undefined || args.runnerV1Authorization !== undefined)
   )
-    throw new CliArgsError('V1 manifest and authorization require --runner-v1-launch.');
+    throw new CliArgsError('V1 manifest and authorization require a V1 launch/readiness mode.');
+  if (args.runnerV1Readiness && args.runnerV1Authorization)
+    throw new CliArgsError('V1 held readiness does not accept a launch authorization.');
   if (
-    args.runnerV1Launch &&
+    (args.runnerV1Launch || args.runnerV1Readiness) &&
     (args.runnerPreflightConfig !== undefined ||
       args.runnerAuthorization !== undefined ||
       args.runnerReadinessAuthorization !== undefined)
@@ -408,6 +427,26 @@ async function main(): Promise<void> {
           ),
         });
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (args.runnerV1Readiness) {
+    if (!args.runnerV1Manifest) {
+      console.error('[Pixel Agents] V1 held readiness requires --runner-v1-manifest.');
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const result = await prepareCompanyRunnerV1Readiness({
+        manifestPath: args.runnerV1Manifest,
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      console.error(
+        `[Pixel Agents] ${error instanceof Error ? error.message : 'Company Runner V1 readiness failed closed.'}`,
+      );
+      process.exitCode = 1;
+    }
     return;
   }
 
