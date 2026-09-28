@@ -291,7 +291,9 @@ export function validateRunnerCliMode(args: CliArgs): void {
     conflictingLegacyOptions.length > 0
   ) {
     throw new CliArgsError(
-      'Runner production/readiness modes cannot be combined with legacy Runner options: ' +
+      (args.runnerProductionLaunch
+        ? '--runner-production-launch cannot be combined with legacy Runner options: '
+        : 'Runner production/readiness modes cannot be combined with legacy Runner options: ') +
         conflictingLegacyOptions.join(', ') +
         '.',
     );
