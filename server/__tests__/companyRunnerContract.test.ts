@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { promisify } from 'util';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 
 import type { EmployeeIdentity } from '../src/actionableTaskDiscovery.js';
 import {
@@ -40,6 +40,7 @@ const HEAD = 'b'.repeat(40);
 const BRANCH = 'task/TASK-051-v1-rescue-common-contract';
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -601,6 +602,54 @@ it('general launcher selects the authoritative role and preserves the HOLD bound
     },
     { consumer: 'RoleOperator', workspace: await realpath(fixture.workspace) },
   ]);
+});
+
+it('stages the default dispatcher schema inside the role workspace and cleans it after dispatch', async () => {
+  const successful = await lifecycleFixture();
+  const successfulManifest = await launcherManifest(successful, false);
+  const failing = await lifecycleFixture();
+  const failingManifest = await launcherManifest(failing, false);
+  const stagedPaths: string[] = [];
+  let dispatchCount = 0;
+  vi.spyOn(CodexAgentDispatcher.prototype, 'dispatch').mockImplementation(async function (
+    this: CodexAgentDispatcher,
+    packet,
+    signal,
+  ) {
+    const dispatcherOptions = (
+      this as unknown as { options: { outputSchemaPath: string; approvedWorkingRoot: string } }
+    ).options;
+    const stagedPath = await realpath(dispatcherOptions.outputSchemaPath);
+    const approvedRoot = await realpath(dispatcherOptions.approvedWorkingRoot);
+    expect(path.relative(approvedRoot, stagedPath)).not.toMatch(/^\.\.(?:[\\/]|$)/);
+    expect(await readFile(stagedPath, 'utf8')).toBe('{}\n');
+    stagedPaths.push(stagedPath);
+    dispatchCount++;
+    if (dispatchCount === 2) throw new Error('focused dispatch failure');
+    return lifecycleDispatcher([]).dispatch(packet, signal);
+  });
+
+  for (const [fixture, manifest, succeeds] of [
+    [successful, successfulManifest, true],
+    [failing, failingManifest, false],
+  ] as const) {
+    const launch = launchCompanyRunnerV1({
+      manifestPath: manifest.path,
+      authorization: {
+        schema_version: '1',
+        authorization: 'RED',
+        authorized_by: 'Goi',
+        task_id: 'TASK-051',
+        manifest_sha256: `sha256:${createHash('sha256').update(manifest.bytes).digest('hex')}`,
+      },
+      governanceGate: async () => undefined,
+      githubResolver,
+    });
+    if (succeeds) await expect(launch).resolves.toMatchObject({ outcome: 'DISPATCHED' });
+    else await expect(launch).rejects.toThrow('focused dispatch failure');
+    expect(path.dirname(stagedPaths.at(-1)!)).toContain(await realpath(fixture.workspace));
+    await expect(readFile(stagedPaths.at(-1)!, 'utf8')).rejects.toThrow();
+  }
 });
 
 it('fails closed when the narrow role-workspace gate rejects after live Runner admission', async () => {
