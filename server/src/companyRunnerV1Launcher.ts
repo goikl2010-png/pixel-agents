@@ -1,5 +1,6 @@
 import { execFile } from 'child_process';
 import { createHash } from 'crypto';
+import { constants } from 'fs';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
@@ -396,20 +397,36 @@ export async function launchCompanyRunnerV1(
     options.governanceGate,
   );
   const { workspace, checkpointStore } = resolved;
-  const outputSchema = path.resolve(manifest.output_schema);
+  const configuredOutputSchema = path.resolve(manifest.output_schema);
   const dispatcher =
     options.dispatcher ??
-    new CodexAgentDispatcher({
-      executable: manifest.executable,
-      allowedExecutable: manifest.executable,
-      workingRoot: workspace.root,
-      approvedWorkingRoot: workspace.root,
-      outputSchemaPath: outputSchema,
-      timeoutMs: manifest.timeout_ms,
-      credentialEnvironmentVariable: 'GH_TOKEN',
-      githubNetworkPolicy: 'governance',
-      parentEnvironment: options.parentEnvironment,
-    });
+    ({
+      dispatch: async (packet, signal) => {
+        const schemaDirectory = await fs.mkdtemp(
+          path.join(workspace.root, '.company-runner-schema-'),
+        );
+        const outputSchema = path.join(schemaDirectory, 'agent-result.schema.json');
+        try {
+          await fs.copyFile(configuredOutputSchema, outputSchema, constants.COPYFILE_EXCL);
+          await fs.chmod(outputSchema, 0o444);
+          return await new CodexAgentDispatcher({
+            executable: manifest.executable,
+            allowedExecutable: manifest.executable,
+            workingRoot: workspace.root,
+            approvedWorkingRoot: workspace.root,
+            outputSchemaPath: outputSchema,
+            timeoutMs: manifest.timeout_ms,
+            credentialEnvironmentVariable: 'GH_TOKEN',
+            githubNetworkPolicy: 'governance',
+            parentEnvironment: options.parentEnvironment,
+          }).dispatch(packet, signal);
+        } finally {
+          await fs.chmod(outputSchema, 0o600).catch(() => undefined);
+          await fs.unlink(outputSchema).catch(() => undefined);
+          await fs.rmdir(schemaDirectory).catch(() => undefined);
+        }
+      },
+    } satisfies AgentDispatcher);
   const githubResolver =
     options.githubResolver ??
     new GhCliGitHubFactResolver({
