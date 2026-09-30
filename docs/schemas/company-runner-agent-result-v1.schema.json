@@ -18,11 +18,12 @@
     "context_manifest_sha256"
   ],
   "properties": {
-    "contract": { "const": "AgentResultV1" },
-    "schema_version": { "const": "1" },
+    "contract": { "type": "string", "const": "AgentResultV1" },
+    "schema_version": { "type": "string", "const": "1" },
     "task_id": { "type": "string", "pattern": "^TASK-[0-9]+$" },
-    "role": { "enum": ["Alex", "Nova", "Pixel", "Atlas"] },
+    "role": { "type": "string", "enum": ["Alex", "Nova", "Pixel", "Atlas"] },
     "from_state": {
+      "type": "string",
       "enum": [
         "BACKLOG",
         "DEVELOPMENT",
@@ -36,104 +37,84 @@
         "BLOCKED"
       ]
     },
-    "outcome": { "enum": ["completed", "blocked", "failed"] },
+    "outcome": { "type": "string", "enum": ["completed", "blocked", "failed"] },
     "next_state": {
-      "oneOf": [
-        {
-          "enum": [
-            "DEVELOPMENT",
-            "READY_FOR_QA",
-            "QA",
-            "CHANGES_REQUIRED",
-            "QA_RETEST",
-            "READY_FOR_REVIEW",
-            "REVIEW",
-            "APPROVED",
-            "COMPLETED",
-            "BLOCKED"
-          ]
-        },
-        { "type": "null" }
+      "type": ["string", "null"],
+      "enum": [
+        "DEVELOPMENT",
+        "READY_FOR_QA",
+        "QA",
+        "CHANGES_REQUIRED",
+        "QA_RETEST",
+        "READY_FOR_REVIEW",
+        "REVIEW",
+        "APPROVED",
+        "COMPLETED",
+        "BLOCKED",
+        null
       ]
     },
     "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
     "evidence": {
       "type": "array",
-      "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 }
     },
     "publication": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "repository",
-            "branch",
-            "base_sha",
-            "changed_paths",
-            "commit_message",
-            "pull_request"
-          ],
-          "properties": {
-            "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
-            "branch": { "type": "string", "minLength": 1 },
-            "base_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-            "changed_paths": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": { "type": "string", "minLength": 1 }
-            },
-            "commit_message": { "type": "string", "minLength": 1, "maxLength": 200 },
-            "pull_request": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["base", "title", "body"],
-                  "properties": {
-                    "base": { "const": "main" },
-                    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
-                    "body": { "type": "string", "minLength": 1, "maxLength": 10000 }
-                  }
-                },
-                { "type": "null" }
-              ]
-            }
-          }
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "branch",
+        "base_sha",
+        "changed_paths",
+        "commit_message",
+        "pull_request"
+      ],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+        "branch": { "type": "string", "minLength": 1 },
+        "base_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "changed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
         },
-        { "type": "null" }
-      ]
+        "commit_message": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "pull_request": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["base", "title", "body"],
+          "properties": {
+            "base": { "type": "string", "const": "main" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "body": { "type": "string", "minLength": 1, "maxLength": 10000 }
+          }
+        }
+      }
     },
     "completion": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "repository",
-            "issue",
-            "pull_request",
-            "branch",
-            "head_sha",
-            "merge_sha",
-            "issue_state",
-            "pull_request_state"
-          ],
-          "properties": {
-            "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
-            "issue": { "type": "integer", "minimum": 1 },
-            "pull_request": { "type": "integer", "minimum": 1 },
-            "branch": { "type": "string", "minLength": 1 },
-            "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-            "merge_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-            "issue_state": { "const": "CLOSED" },
-            "pull_request_state": { "const": "MERGED" }
-          }
-        },
-        { "type": "null" }
-      ]
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "issue",
+        "pull_request",
+        "branch",
+        "head_sha",
+        "merge_sha",
+        "issue_state",
+        "pull_request_state"
+      ],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+        "issue": { "type": "integer", "minimum": 1 },
+        "pull_request": { "type": "integer", "minimum": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "merge_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "issue_state": { "type": "string", "const": "CLOSED" },
+        "pull_request_state": { "type": "string", "const": "MERGED" }
+      }
     },
     "context_manifest_sha256": {
       "type": "string",
