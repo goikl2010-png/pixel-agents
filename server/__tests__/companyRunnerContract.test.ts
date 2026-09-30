@@ -125,8 +125,35 @@ it('Codex dispatcher accepts the checked-in AgentResultV1 schema and returns the
     __dirname,
     '../../docs/schemas/company-runner-agent-result-v1.schema.json',
   );
+  const schemaText = await readFile(checkedInSchema, 'utf8');
+  const schema = JSON.parse(schemaText) as {
+    properties: Record<string, { type?: string | string[]; enum?: unknown[] }>;
+  };
+  expect(schemaText).not.toContain('"oneOf"');
+  for (const property of ['contract', 'schema_version', 'role', 'from_state', 'outcome']) {
+    expect(schema.properties[property]?.type).toBe('string');
+  }
+  expect(schema.properties.next_state).toMatchObject({
+    type: ['string', 'null'],
+    enum: expect.arrayContaining([null]),
+  });
+  expect(schema.properties.publication.type).toEqual(['object', 'null']);
+  expect(schema.properties.completion.type).toEqual(['object', 'null']);
+  const assertClosedRequiredObjects = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    const candidate = node as Record<string, unknown>;
+    const types = Array.isArray(candidate.type) ? candidate.type : [candidate.type];
+    if (types.includes('object')) {
+      const properties = candidate.properties as Record<string, unknown>;
+      expect(candidate.additionalProperties).toBe(false);
+      expect([...(candidate.required as string[])].sort()).toEqual(Object.keys(properties).sort());
+    }
+    for (const value of Object.values(candidate)) assertClosedRequiredObjects(value);
+  };
+  assertClosedRequiredObjects(schema);
+
   const schemaPath = path.join(workspace, 'agent-result.schema.json');
-  await writeFile(schemaPath, await readFile(checkedInSchema));
+  await writeFile(schemaPath, schemaText);
   const contextHash = `sha256:${'c'.repeat(64)}`;
   const agentResult = result('Nova', 'DEVELOPMENT', 'READY_FOR_QA', contextHash);
   const dispatcher = new CodexAgentDispatcher({
